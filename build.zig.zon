@@ -1,0 +1,12 @@
+.{
+    .name = .mathrepl,
+    .version = "0.0.1",
+    .fingerprint = 0xdeed6b50dad3b9a6, // Changing this has security and trust implications.
+    .minimum_zig_version = "0.16.0-dev.1631+2aff85384",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+    .dependencies = .{},
+}
