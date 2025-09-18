@@ -34,6 +34,9 @@ pub const Token = union(Kind) {
     semicolon,
     comma,
 
+    paren_l,
+    paren_r,
+
     ampersand,
     pipe,
     percent,
@@ -75,6 +78,11 @@ pub const Token = union(Kind) {
         semicolon,
         /// Consists of `','`.
         comma,
+
+        /// Consists of `'('`.
+        paren_l,
+        /// Consists of `')'`.
+        paren_r,
 
         /// Consists of `'&'`.
         ampersand,
@@ -124,12 +132,15 @@ pub const Token = union(Kind) {
                 .whitespace => .null,
                 .ident => .null,
                 .number => .null,
+
                 .let => .{ .str = "let" },
                 .underscore => .{ .char = '_' },
                 .equal => .{ .char = '=' },
                 .colon => .{ .char = ':' },
                 .semicolon => .{ .char = ';' },
                 .comma => .{ .char = ',' },
+                .paren_l => .{ .char = '(' },
+                .paren_r => .{ .char = ')' },
 
                 .ampersand => .{ .char = '&' },
                 .pipe => .{ .char = '|' },
@@ -273,7 +284,7 @@ pub fn peekToken(
                     break :sw .{ .whitespace, .start };
                 },
 
-                inline '=', ':', ';', ',', '&', '|', '%' => |char| {
+                inline '=', ':', ';', ',', '&', '|', '%', '(', ')' => |char| {
                     const kind: Token.Kind = comptime switch (char) {
                         '=' => .equal,
                         ':' => .colon,
@@ -282,6 +293,8 @@ pub fn peekToken(
                         '&' => .ampersand,
                         '|' => .pipe,
                         '%' => .percent,
+                        '(' => .paren_l,
+                        ')' => .paren_r,
                         else => @compileError("Unhandled: '" ++ .{char} ++ "'"),
                     };
                     break :sw .{ kind, .start };
@@ -299,7 +312,7 @@ pub fn peekToken(
                     const kind: Token.Kind = switch (src.buffered()[1]) {
                         '%' => percent,
                         '|' => pipe,
-                        else => break :sw .{ pipe, .start },
+                        else => break :sw .{ simple, .start },
                     };
                     break :sw .{ kind, .start };
                 },
@@ -568,6 +581,8 @@ test Lexer {
     try expectTokenization(":", &.{.static(.colon)});
     try expectTokenization("=", &.{.static(.equal)});
     try expectTokenization(";", &.{.static(.semicolon)});
+    try expectTokenization("(", &.{.static(.paren_l)});
+    try expectTokenization(")", &.{.static(.paren_r)});
 
     try expectTokenization("&", &.{.static(.ampersand)});
     try expectTokenization("|", &.{.static(.pipe)});
@@ -585,6 +600,18 @@ test Lexer {
         .number("3u8"),
         .space,
         .static(.plus_percent),
+        .space,
+        .number("255u8"),
+    });
+
+    try expectTokenization("(a:u8) - 255u8", &.{
+        .static(.paren_l),
+        .ident("a"),
+        .static(.colon),
+        .ident("u8"),
+        .static(.paren_r),
+        .space,
+        .static(.sub),
         .space,
         .number("255u8"),
     });
