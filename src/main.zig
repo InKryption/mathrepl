@@ -6,8 +6,11 @@ const Cmd = struct {
 
     const Input = union(enum) {
         const Tag = @typeInfo(Input).@"union".tag_type.?;
+        /// Indicates desire to run the REPL.
         repl,
+        /// Expression to evaluate directly.
         eval: []const u8,
+        /// Path to file with source to evaluate.
         run: []const u8,
     };
 
@@ -81,13 +84,34 @@ pub fn main() !void {
     std.log.info("{}", .{cmd});
 
     switch (cmd.input) {
+        inline .eval, .run => |expr_or_path, tag| {
+            const tokens: mre.Tokens = switch (tag) {
+                .repl => comptime unreachable,
+                .eval => try .tokenizeSlice(gpa, expr_or_path),
+                .run => run: {
+                    const src_file = try std.fs.cwd().openFile(expr_or_path, .{});
+                    defer src_file.close();
+
+                    var buffer: [4096]u8 = undefined;
+                    var src_file_reader = src_file.reader(&buffer);
+                    break :run try .tokenizeReader(gpa, &src_file_reader.interface);
+                },
+            };
+            defer tokens.deinit(gpa);
+            const ast = try mre.Ast.parse(gpa, tokens);
+            defer ast.deinit(gpa);
+
+            var stdout_writer = std.fs.File.stdout().writer(&.{});
+            var walk_buffer: [32]u64 = undefined;
+            try stdout_writer.interface.print("fmt: {f}", .{ast.nodeFmt(tokens, .{
+                .node = 0,
+                .walk_buffer = &walk_buffer,
+            })});
+            try stdout_writer.interface.flush();
+        },
         .repl => {
             std.log.err("TODO: implement repl", .{});
             return;
         },
-        .eval => {
-            
-        },
-        .run => {},
     }
 }

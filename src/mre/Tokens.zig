@@ -21,12 +21,20 @@ pub fn deinit(self: Tokens, gpa: std.mem.Allocator) void {
 
 pub const Value = extern struct {
     kind: Lexer.Token.Kind,
-    start: ByteOffset,
-    end: ByteOffset,
+    loc: Loc,
 
     pub const Index = u32;
     pub const List = std.MultiArrayList(Value);
     pub const ByteOffset = u32;
+
+    pub const Loc = extern struct {
+        start: ByteOffset,
+        end: ByteOffset,
+
+        pub fn getSrc(loc: Loc, src: []const u8) []const u8 {
+            return src[loc.start..loc.end];
+        }
+    };
 };
 
 pub const Src = union(Lexer.Mode) {
@@ -142,9 +150,9 @@ fn reuseTokenizeImpl(
     var lexer: Lexer = .init;
     while (true) {
         const tok = try nextToken(gpa, src, mode, &lexer, src_buffer);
-        if (tok.kind == .eof) break;
         if (list.len == std.math.maxInt(Value.Index)) unreachable;
         try list.append(gpa, tok);
+        if (tok.kind == .eof) break;
     }
 }
 
@@ -186,7 +194,9 @@ fn nextToken(
 
     return .{
         .kind = first.getKind(),
-        .start = start,
-        .end = start + len,
+        .loc = .{
+            .start = start,
+            .end = start + len,
+        },
     };
 }

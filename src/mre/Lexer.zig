@@ -40,6 +40,7 @@ pub const Token = union(Kind) {
     ampersand,
     pipe,
     percent,
+    slash,
 
     plus,
     plus_pipe,
@@ -48,6 +49,10 @@ pub const Token = union(Kind) {
     sub,
     sub_pipe,
     sub_percent,
+
+    mul,
+    mul_pipe,
+    mul_percent,
 
     pub const Kind = enum(u8) {
         /// Simple empty token placed at the end.
@@ -90,6 +95,8 @@ pub const Token = union(Kind) {
         pipe,
         /// Consists of `'%'`.
         percent,
+        /// Consists of `'/'`.
+        slash,
 
         /// Consists of `'+'`.
         plus,
@@ -104,6 +111,13 @@ pub const Token = union(Kind) {
         sub_pipe,
         /// Consists of `'-%'`.
         sub_percent,
+
+        /// Consists of `'*'`.
+        mul,
+        /// Consists of `'*|'`.
+        mul_pipe,
+        /// Consists of `'*%'`.
+        mul_percent,
 
         pub const StaticSrc = union(enum) {
             null,
@@ -145,6 +159,7 @@ pub const Token = union(Kind) {
                 .ampersand => .{ .char = '&' },
                 .pipe => .{ .char = '|' },
                 .percent => .{ .char = '%' },
+                .slash => .{ .char = '/' },
 
                 .plus => .{ .char = '+' },
                 .plus_pipe => .{ .str = "+|" },
@@ -153,6 +168,10 @@ pub const Token = union(Kind) {
                 .sub => .{ .char = '-' },
                 .sub_pipe => .{ .str = "-|" },
                 .sub_percent => .{ .str = "-%" },
+
+                .mul => .{ .char = '*' },
+                .mul_pipe => .{ .str = "*|" },
+                .mul_percent => .{ .str = "*%" },
             };
         }
     };
@@ -284,7 +303,7 @@ pub fn peekToken(
                     break :sw .{ .whitespace, .start };
                 },
 
-                inline '=', ':', ';', ',', '&', '|', '%', '(', ')' => |char| {
+                inline '=', ':', ';', ',', '&', '|', '%', '/', '(', ')' => |char| {
                     const kind: Token.Kind = comptime switch (char) {
                         '=' => .equal,
                         ':' => .colon,
@@ -293,6 +312,7 @@ pub fn peekToken(
                         '&' => .ampersand,
                         '|' => .pipe,
                         '%' => .percent,
+                        '/' => .slash,
                         '(' => .paren_l,
                         ')' => .paren_r,
                         else => @compileError("Unhandled: '" ++ .{char} ++ "'"),
@@ -300,10 +320,11 @@ pub fn peekToken(
                     break :sw .{ kind, .start };
                 },
 
-                inline '+', '-' => |char| {
+                inline '+', '-', '*' => |char| {
                     const simple, const percent, const pipe = comptime switch (char) {
                         '+' => .{ .plus, .plus_percent, .plus_pipe },
                         '-' => .{ .sub, .sub_percent, .sub_pipe },
+                        '*' => .{ .mul, .mul_percent, .mul_pipe },
                         else => @compileError("Unhandled: '" ++ .{char} ++ "'"),
                     };
 
