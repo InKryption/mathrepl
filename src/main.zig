@@ -98,14 +98,16 @@ pub fn main() !void {
                 },
             };
             defer tokens.deinit(gpa);
+
             const ast = try mre.Ast.parse(gpa, tokens);
             defer ast.deinit(gpa);
 
             var stdout_writer = std.fs.File.stdout().writer(&.{});
             var walk_buffer: [32]u64 = undefined;
-            try stdout_writer.interface.print("fmt: {f}", .{ast.nodeFmt(tokens, .{
+            try stdout_writer.interface.print("fmt: {f}\n", .{ast.nodeFmt(tokens, .{
                 .node = 0,
                 .walk_buffer = &walk_buffer,
+                .options = .default,
             })});
             try stdout_writer.interface.flush();
         },

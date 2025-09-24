@@ -37,6 +37,9 @@ pub const Token = union(Kind) {
     paren_l,
     paren_r,
 
+    brace_l,
+    brace_r,
+
     ampersand,
     pipe,
     percent,
@@ -88,6 +91,11 @@ pub const Token = union(Kind) {
         paren_l,
         /// Consists of `')'`.
         paren_r,
+
+        /// Consists of `'{'`.
+        brace_l,
+        /// Consists of `'}'`.
+        brace_r,
 
         /// Consists of `'&'`.
         ampersand,
@@ -153,8 +161,11 @@ pub const Token = union(Kind) {
                 .colon => .{ .char = ':' },
                 .semicolon => .{ .char = ';' },
                 .comma => .{ .char = ',' },
+
                 .paren_l => .{ .char = '(' },
                 .paren_r => .{ .char = ')' },
+                .brace_l => .{ .char = '{' },
+                .brace_r => .{ .char = '}' },
 
                 .ampersand => .{ .char = '&' },
                 .pipe => .{ .char = '|' },
@@ -303,7 +314,7 @@ pub fn peekToken(
                     break :sw .{ .whitespace, .start };
                 },
 
-                inline '=', ':', ';', ',', '&', '|', '%', '/', '(', ')' => |char| {
+                inline '=', ':', ';', ',', '&', '|', '%', '/', '(', ')', '{', '}' => |char| {
                     const kind: Token.Kind = comptime switch (char) {
                         '=' => .equal,
                         ':' => .colon,
@@ -315,6 +326,8 @@ pub fn peekToken(
                         '/' => .slash,
                         '(' => .paren_l,
                         ')' => .paren_r,
+                        '{' => .brace_l,
+                        '}' => .brace_r,
                         else => @compileError("Unhandled: '" ++ .{char} ++ "'"),
                     };
                     break :sw .{ kind, .start };

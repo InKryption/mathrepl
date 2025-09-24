@@ -15,10 +15,13 @@ pub fn deinit(ast: Ast, gpa: std.mem.Allocator) void {
 }
 
 pub const Node = union(enum(u8)) {
+    null: struct { Tokens.Value.Index, Packed.Data },
     value_ref: ValueRef,
     grouped: Grouped,
     bin_op: BinOp,
     block: Block,
+
+    pub const null_init: Node = .{ .null = .{ 0, .init(0, 0) } };
 
     pub const Tag = @typeInfo(Node).@"union".tag_type.?;
     pub const Index = u32;
@@ -27,10 +30,22 @@ pub const Node = union(enum(u8)) {
 
     pub const ValueRef = struct {
         main_token: Tokens.Value.Index,
+        unused_data: Packed.Data = .init(0, 0),
 
         pub fn getSrc(ref: ValueRef, tokens: Tokens) []const u8 {
             const tok = tokens.list.get(ref.main_token);
-            return tokens.src.slice()[tok.start..tok.end];
+            return tok.loc.getSrc(tokens.src.slice());
+        }
+
+        pub fn unpack(main_token: Tokens.Value.Index, data: Packed.Data) ValueRef {
+            return .{
+                .main_token = main_token,
+                .unused_data = data,
+            };
+        }
+
+        pub fn pack(ref: ValueRef) struct { Tokens.Value.Index, Packed.Data } {
+            return .{ ref.main_token, ref.unused_data };
         }
     };
 
@@ -38,17 +53,43 @@ pub const Node = union(enum(u8)) {
         lhs: Node.Index,
         op: Tokens.Value.Index,
         rhs: Node.Index,
+
+        pub fn unpack(main_token: Tokens.Value.Index, data: Packed.Data) BinOp {
+            return .{
+                .lhs = data.lhs,
+                .op = main_token,
+                .rhs = data.rhs,
+            };
+        }
+
+        pub fn pack(bin_op: BinOp) struct { Tokens.Value.Index, Packed.Data } {
+            return .{ bin_op.op, .init(bin_op.lhs, bin_op.rhs) };
+        }
     };
 
     pub const Grouped = struct {
         expr: Node.Index,
         paren_l: Tokens.Value.Index,
         paren_r: Tokens.Value.Index,
+
+        pub fn unpack(main_token: Tokens.Value.Index, data: Packed.Data) Grouped {
+            return .{
+                .expr = data.lhs,
+                .paren_l = main_token,
+                .paren_r = data.rhs,
+            };
+        }
+
+        pub fn pack(grouped: Grouped) struct { Tokens.Value.Index, Packed.Data } {
+            return .{ grouped.paren_l, .init(grouped.expr, grouped.paren_r) };
+        }
     };
 
     pub const Block = struct {
         start: u32,
         end: u32,
+        /// NOTE: for the root block, this is eof.
+        closing_brace: Tokens.Value.Index,
 
         pub fn getNodesLen(block: Block) u32 {
             return block.end - block.start;
@@ -56,6 +97,18 @@ pub const Node = union(enum(u8)) {
 
         pub fn getNodes(block: Block, ast: Ast) []const Node.Index {
             return ast.extra_data[block.start..block.end];
+        }
+
+        pub fn unpack(main_token: Tokens.Value.Index, data: Packed.Data) Block {
+            return .{
+                .closing_brace = main_token,
+                .start = data.lhs,
+                .end = data.rhs,
+            };
+        }
+
+        pub fn pack(block: Block) struct { Tokens.Value.Index, Packed.Data } {
+            return .{ block.closing_brace, .init(block.start, block.end) };
         }
     };
 
@@ -67,52 +120,25 @@ pub const Node = union(enum(u8)) {
         pub const Data = extern struct {
             lhs: u32,
             rhs: u32,
+
+            pub fn init(lhs: u32, rhs: u32) Data {
+                return .{ .lhs = lhs, .rhs = rhs };
+            }
         };
 
         pub const List = std.MultiArrayList(Node.Packed);
 
         pub fn unpack(self: Packed) Node {
             return switch (self.tag) {
-                .value_ref => .{ .value_ref = .{
-                    .main_token = self.main_token,
-                } },
-                .bin_op => .{ .bin_op = .{
-                    .lhs = self.data.lhs,
-                    .op = self.main_token,
-                    .rhs = self.data.rhs,
-                } },
-                .grouped => .{ .grouped = .{
-                    .expr = self.data.lhs,
-                    .paren_l = self.main_token,
-                    .paren_r = self.data.rhs,
-                } },
-                .block => .{ .block = .{
-                    .start = self.data.lhs,
-                    .end = self.data.rhs,
-                } },
+                .null => .{ .null = .{ self.main_token, self.data } },
+                inline else => |tag| @unionInit(Node, @tagName(tag), .unpack(self.main_token, self.data)),
             };
         }
 
         pub fn pack(self: Node) Packed {
-            const main_token: Tokens.Value.Index, //
-            const data: Data //
-            = switch (self) {
-                .value_ref => |int| .{
-                    int.main_token,
-                    .{ .lhs = 0, .rhs = 0 },
-                },
-                .bin_op => |bin_op| .{
-                    bin_op.op,
-                    .{ .lhs = bin_op.lhs, .rhs = bin_op.rhs },
-                },
-                .grouped => |grouped| .{
-                    grouped.paren_l,
-                    .{ .lhs = grouped.expr, .rhs = grouped.paren_r },
-                },
-                .block => |block| .{
-                    0,
-                    .{ .lhs = block.start, .rhs = block.end },
-                },
+            const main_token: Tokens.Value.Index, const data: Data = switch (self) {
+                .null => |unused| unused,
+                inline else => |pl| pl.pack(),
             };
             return .{
                 .tag = self,
@@ -125,25 +151,11 @@ pub const Node = union(enum(u8)) {
             const e_fields = @typeInfo(Tag).@"enum".fields;
             @setEvalBranchQuota(e_fields.len * 3 + 1);
             for (e_fields) |e_field| {
-                const tag: Tag = @enumFromInt(e_field.value);
-                const original: Node = @unionInit(Node, e_field.name, switch (tag) {
-                    .value_ref => .{ .main_token = 123 },
-                    .bin_op => .{
-                        .lhs = 6,
-                        .op = 7,
-                        .rhs = 8,
-                    },
-                    .grouped => .{
-                        .expr = 2,
-                        .paren_l = 20,
-                        .paren_r = 200,
-                    },
-                    .block => .{
-                        .start = 10,
-                        .end = 30,
-                    },
-                });
-                const packed_value: Node.Packed = .pack(original);
+                const packed_value: Node.Packed = .{
+                    .tag = @enumFromInt(e_field.value),
+                    .main_token = 1,
+                    .data = .init(2, 3),
+                };
                 const unpacked_value: Node = packed_value.unpack();
                 const repacked_value: Packed = .pack(unpacked_value);
                 if (repacked_value.tag == packed_value.tag and
@@ -170,180 +182,278 @@ pub const Node = union(enum(u8)) {
 pub fn nodeFmt(
     ast: Ast,
     tokens: Tokens,
-    params: struct {
-        node: Node.Index,
-        /// Buffer for walking the tree of nodes.
-        walk_buffer: []u64,
-    },
+    params: NodeFmt.Params,
 ) NodeFmt {
     return .{
-        .node = params.node,
         .ast = ast,
         .tokens = tokens,
-        .walk_buffer = params.walk_buffer,
+        .params = params,
     };
 }
 
 pub const NodeFmt = struct {
-    node: Node.Index,
     ast: Ast,
     tokens: Tokens,
-    /// Buffer for walking the tree of nodes.
-    walk_buffer: []u64,
+    params: Params,
+
+    pub const Params = struct {
+        node: Node.Index,
+        /// Buffer for walking the tree of nodes.
+        /// The number of elements directly corresponds to the maximum nesting level,
+        /// after which point any deeper nodes in the AST will be truncated.
+        /// To avoid any truncation, should be `walk_buffer.len == ast.nodes.len`.
+        walk_buffer: []u64,
+        options: Options,
+
+        pub const Options = struct {
+            precedence_delims: ?[2][]const u8,
+            truncated_str: []const u8,
+
+            pub const default: Options = .{
+                .precedence_delims = null,
+                .truncated_str = "<...>",
+            };
+
+            pub const default_prec_delim: Options = .{
+                .precedence_delims = .{ "(", ")" },
+                .truncated_str = "<...>",
+            };
+        };
+    };
 
     pub fn format(
         self: NodeFmt,
         w: *std.Io.Writer,
     ) std.Io.Writer.Error!void {
-        const truncated_str = "<...>";
+        const params = self.params;
+        const options = params.options;
 
         const Pending = packed struct(u64) {
-            kind: enum(u2) {
-                token,
-                /// Ignores the `index` and `data` fields.
-                node_block,
-                node,
-            },
-            index: u32,
-            data: packed union {
-                token: enum(u30) { generic, space_surround, _ },
-                node_block: packed struct(u30) {
-                    index: u30,
+            node: Node.Index,
+            state: packed union {
+                const initial: u32 = 0;
+                raw: enum(u32) {
+                    initial = initial,
+                    _,
                 },
-                node: enum(u30) { empty, _ },
+                grouped: enum(u32) {
+                    start = initial,
+                    end,
+                    _,
+                },
+                bin_op: enum(u32) {
+                    start = initial,
+                    op,
+                    close_precedence_delim,
+                    _,
+                },
+                block: packed struct(u32) {
+                    index: u32 = initial,
+                },
             },
         };
-        var pending_stack: std.ArrayList(Pending) = .initBuffer(@ptrCast(self.walk_buffer));
-        var first_pop: ?Pending = .{
-            .kind = .node,
-            .index = self.node,
-            .data = .{ .node = .empty },
+        var pending_stack: std.ArrayList(Pending) = .initBuffer(@ptrCast(params.walk_buffer));
+        pending_stack.appendBounded(.{
+            .node = params.node,
+            .state = .{ .raw = .initial },
+        }) catch {
+            try w.writeAll(options.truncated_str);
+            return;
         };
-        var indent: u30 = 0;
-        while (pending_stack.pop() orelse first_pop) |pending| {
-            first_pop = null;
-            switch (pending.kind) {
-                .token => {
-                    const tok = self.tokens.list.get(pending.index);
-                    const tok_src = tok.loc.getSrc(self.tokens.src.slice());
-                    switch (pending.data.token) {
-                        .generic => try w.writeAll(tok_src),
-                        .space_surround => {
-                            var surrounded = [_][]const u8{ " ", tok_src, " " };
-                            try w.writeVecAll(&surrounded);
-                        },
-                        _ => unreachable,
-                    }
+        var indent: u32 = 0;
+        while (true) {
+            const pending: Pending = pending_stack.pop() orelse break;
+            const pending_node = self.ast.nodes.get(pending.node);
+            switch (pending_node.unpack()) {
+                .null => try w.writeAll("<null>"),
+                .value_ref => |value_ref| {
+                    const src = value_ref.getSrc(self.tokens);
+                    try w.print("{f}", .{std.zig.fmtString(src)});
                 },
-                .node_block => {
-                    const nodes = self.ast.nodes.get(pending.index).unpack().block.getNodes(self.ast);
-                    std.debug.assert(nodes.len != 0);
-                    if (pending.data.node_block.index != 0) {
-                        try w.writeByte(';');
-                    }
-                    if (pending.data.node_block.index == nodes.len) {
-                        if (nodes.len > 1) {
-                            indent -= 1;
-                            try w.writeByte('\n');
-                            try w.splatBytesAll(" " ** 4, indent);
-                        } else {
-                            try w.writeByte(' ');
-                        }
-                        try w.writeByte('}');
-                    } else {
-                        pending_stack.appendSliceAssumeCapacity(&.{ // checked when we appended this node_block the first time
-                            .{
-                                .kind = .node_block,
-                                .index = pending.index,
-                                .data = .{ .node_block = .{ .index = pending.data.node_block.index + 1 } },
-                            },
-                            .{
-                                .kind = .node,
-                                .index = nodes[pending.data.node_block.index],
-                                .data = .{ .node = .empty },
-                            },
-                        });
-                        if (nodes.len > 1) {
-                            try w.writeByte('\n');
-                            try w.splatBytesAll(" " ** 4, indent);
-                        }
-                    }
-                },
-                .node => switch (self.ast.nodes.get(pending.index).unpack()) {
-                    .value_ref => |value_ref| {
-                        const tok = self.tokens.list.get(value_ref.main_token);
-                        const tok_src = tok.loc.getSrc(self.tokens.src.slice());
-                        try w.print("{s}", .{tok_src});
-                    },
-                    .grouped => |grouped| {
+                .grouped => |grouped| switch (pending.state.grouped) {
+                    .start => {
                         pending_stack.appendSliceBounded(&.{
                             .{
-                                .kind = .token,
-                                .index = grouped.paren_r,
-                                .data = .{ .token = .generic },
+                                .node = pending.node,
+                                .state = .{ .grouped = .end },
                             },
                             .{
-                                .kind = .node,
-                                .index = grouped.expr,
-                                .data = .{ .token = .generic },
+                                .node = grouped.expr,
+                                .state = .{ .raw = .initial },
                             },
                         }) catch {
-                            try w.writeAll("(" ++ truncated_str ++ ")");
+                            try writeVecAllCopy(w, .{ "(", options.truncated_str, ")" });
                             continue;
                         };
                         try w.writeByte('(');
                     },
-                    .bin_op => |bin_op| {
+                    .end => {
+                        try w.writeByte(')');
+                    },
+                    _ => unreachable,
+                },
+                .bin_op => |bin_op| bin_op_sw: switch (pending.state.bin_op) {
+                    .start => {
+                        if (pending.node != params.node) {
+                            if (options.precedence_delims) |delims| {
+                                const start_delim, _ = delims;
+                                try w.writeAll(start_delim);
+                            }
+                        }
                         pending_stack.appendSliceBounded(&.{
                             .{
-                                .kind = .node,
-                                .index = bin_op.rhs,
-                                .data = .{ .node = .empty },
+                                .node = pending.node,
+                                .state = .{ .bin_op = .op },
                             },
                             .{
-                                .kind = .token,
-                                .index = bin_op.op,
-                                .data = .{ .token = .space_surround },
-                            },
-                            .{
-                                .kind = .node,
-                                .index = bin_op.lhs,
-                                .data = .{ .node = .empty },
+                                .node = bin_op.lhs,
+                                .state = .{ .raw = .initial },
                             },
                         }) catch {
-                            const op_static_str = self.tokens.list.get(bin_op.op).kind.staticSrc();
-                            const op_str = op_static_str.asStr().?;
-                            var truncated_bin_op_strs = [_][]const u8{ truncated_str ++ " ", op_str, " " ++ truncated_str };
-                            try w.writeVecAll(&truncated_bin_op_strs);
+                            const op_tok = self.tokens.list.get(bin_op.op);
+                            const op_str = op_tok.loc.getSrc(self.tokens.src.slice());
+                            try writeVecAllCopy(w, .{ options.truncated_str, " ", op_str, " ", options.truncated_str });
+                            continue :bin_op_sw .close_precedence_delim;
                         };
                     },
-                    .block => |block| {
-                        // see the `node_block` branch.
-                        if (pending_stack.unusedCapacitySlice().len < 2) {
-                            try w.writeAll("{" ++ truncated_str ++ "}");
-                            continue;
+                    .op => {
+                        const op_tok = self.tokens.list.get(bin_op.op);
+                        const op_str = op_tok.loc.getSrc(self.tokens.src.slice());
+                        try writeVecAllCopy(w, .{ " ", op_str, " " });
+                        // if we got here, it means that the `appendSliceBounded` call in the `start` branch
+                        // was successful in appending 2 nodes, and that capacity shouldn't be any different
+                        // at this point.
+                        pending_stack.appendSliceAssumeCapacity(&.{
+                            .{
+                                .node = pending.node,
+                                .state = .{ .bin_op = .close_precedence_delim },
+                            },
+                            .{
+                                .node = bin_op.rhs,
+                                .state = .{ .raw = .initial },
+                            },
+                        });
+                    },
+                    .close_precedence_delim => {
+                        if (pending.node != params.node) {
+                            if (options.precedence_delims) |delims| {
+                                _, const end_delim = delims;
+                                try w.writeAll(end_delim);
+                            }
                         }
-                        const nodes = block.getNodes(self.ast);
-                        pending_stack.appendBounded(.{
-                            .kind = .node_block,
-                            .index = pending.index,
-                            .data = .{ .node_block = .{ .index = 0 } },
-                        }) catch {
-                            try w.writeAll("{" ++ truncated_str ++ "}");
-                            continue;
-                        };
-                        try w.writeByte('{');
-                        if (nodes.len > 1) {
-                            indent += 1;
-                        } else {
+                    },
+                    _ => unreachable,
+                },
+                .block => |block| {
+                    const four_spaces = " " ** 4;
+
+                    var state = pending.state.block;
+                    const block_nodes = block.getNodes(self.ast);
+                    if (block_nodes.len == 0) {
+                        std.debug.assert(state.index == 0);
+                        try w.writeAll("{}");
+                        continue;
+                    }
+
+                    const target_node_index = state.index;
+                    if (target_node_index == block_nodes.len) {
+                        try w.writeByte(';');
+                        if (block_nodes.len == 1) {
                             try w.writeByte(' ');
+                        } else {
+                            indent -= 1;
+                            try w.writeByte('\n');
+                            try w.splatBytesAll(four_spaces, indent);
                         }
-                    },
+                        try w.writeByte('}');
+                        continue;
+                    }
+
+                    const target_node = block_nodes[target_node_index];
+                    state.index += 1;
+
+                    pending_stack.appendSliceBounded(&.{
+                        .{
+                            .node = pending.node,
+                            .state = .{ .block = state },
+                        },
+                        .{
+                            .node = target_node,
+                            .state = .{ .raw = .initial },
+                        },
+                    }) catch {
+                        std.debug.assert(target_node_index == 0); // this has to be the first time we're actually here
+                        try writeVecAllCopy(w, .{ "{ ", options.truncated_str, " }" });
+                        continue;
+                    };
+
+                    if (target_node_index == 0) {
+                        try w.writeByte('{');
+                        if (block_nodes.len == 1) {
+                            try w.writeByte(' ');
+                        } else {
+                            try w.writeByte('\n');
+                            indent += 1;
+                        }
+                    } else {
+                        try w.writeByte(';');
+                        if (block_nodes.len != 1) {
+                            try w.writeByte('\n');
+                        }
+                    }
+
+                    try w.splatBytesAll(four_spaces, indent);
                 },
             }
         }
     }
 };
+
+fn writeVecAllCopy(
+    w: *std.Io.Writer,
+    vec: anytype,
+) std.Io.Writer.Error!void {
+    var copy: [vec.len][]const u8 = vec;
+    try w.writeVecAll(&copy);
+}
+
+const OperInfo = struct {
+    prec: u32,
+    assoc: enum { none, left, right },
+
+    fn choose(lhs: OperInfo, rhs: OperInfo) enum { invalid, lhs, rhs } {
+        return switch (std.math.order(lhs.prec, rhs.prec)) {
+            .eq => if (lhs.assoc != rhs.assoc)
+                .invalid
+            else switch (lhs.assoc) {
+                .none => .invalid,
+                .left => .lhs,
+                .right => .rhs,
+            },
+            .lt => .rhs,
+            .gt => .lhs,
+        };
+    }
+};
+
+const oper_table: std.EnumMap(Lexer.Token.Kind, OperInfo) = .init(.{
+    .ampersand = .{ .prec = 1, .assoc = .left },
+    .pipe = .{ .prec = 1, .assoc = .left },
+    .percent = .{ .prec = 2, .assoc = .left },
+    .slash = .{ .prec = 2, .assoc = .left },
+
+    .plus = .{ .prec = 1, .assoc = .left },
+    .plus_pipe = .{ .prec = 1, .assoc = .left },
+    .plus_percent = .{ .prec = 1, .assoc = .left },
+
+    .sub = .{ .prec = 1, .assoc = .left },
+    .sub_pipe = .{ .prec = 1, .assoc = .left },
+    .sub_percent = .{ .prec = 1, .assoc = .left },
+
+    .mul = .{ .prec = 2, .assoc = .left },
+    .mul_pipe = .{ .prec = 2, .assoc = .left },
+    .mul_percent = .{ .prec = 2, .assoc = .left },
+});
 
 pub fn parse(
     gpa: std.mem.Allocator,
@@ -358,24 +468,18 @@ pub fn parse(
     var scratch: std.ArrayList(u32) = .empty;
     defer scratch.deinit(gpa);
 
+    var states: std.ArrayList(Parser.State) = .empty;
+    defer states.deinit(gpa);
+
     var parser: Parser = .{
         .tokens = &tokens,
         .tokens_index = 0,
         .nodes = &nodes,
         .extra_data = &extra_data,
         .scratch = &scratch,
+        .states = &states,
     };
-    const root = try parser.addNode(gpa, .{ .block = undefined });
-    while (try parser.expectStatementOrExpr(gpa)) |statement_or_expr| {
-        try scratch.append(gpa, statement_or_expr);
-    }
-    const root_block_start = extra_data.items.len;
-    try extra_data.appendSlice(gpa, scratch.items);
-    const root_block_end = extra_data.items.len;
-    nodes.set(root, .pack(.{ .block = .{
-        .start = @intCast(root_block_start),
-        .end = @intCast(root_block_end),
-    } }));
+    try parser.parse(gpa);
 
     var nodes_final = nodes.toOwnedSlice();
     errdefer nodes_final.deinit(gpa);
@@ -395,8 +499,316 @@ const Parser = struct {
     nodes: *Node.Packed.List,
     extra_data: *std.ArrayList(u32),
     scratch: *std.ArrayList(u32),
+    states: *std.ArrayList(State),
 
     const ParseError = error{ParseFail};
+
+    fn parse(parser: *Parser, gpa: std.mem.Allocator) !void {
+        const tokens_kind: []const Lexer.Token.Kind = parser.tokens.list.items(.kind);
+
+        const root_node = try parser.addNode(gpa, undefined);
+        std.debug.assert(root_node == Node.root_index);
+
+        try parser.states.append(gpa, .{ .expect_block_statements = .{
+            .dst_node = root_node,
+            .scratch_start = @intCast(parser.scratch.items.len),
+        } });
+        mainloop: while (parser.states.pop()) |state| switch (state) {
+            .expect_block_statements => |data| {
+                parser.skipWhitespace();
+                const scratch_start: u32 = data.scratch_start;
+                std.debug.assert(parser.scratch.items.len >= scratch_start);
+                defer std.debug.assert(parser.scratch.items.len >= scratch_start);
+
+                const closing_brace: Tokens.Value.Index = switch (tokens_kind[parser.tokens_index]) {
+                    .eof, .brace_r => parser.tokens_index,
+                    else => {
+                        const block_item_node = try parser.addNode(gpa, undefined);
+                        try parser.scratch.append(gpa, block_item_node);
+                        try parser.states.appendSlice(gpa, &.{
+                            .{ .expect_block_statements = data },
+                            .{
+                                .expect_statement_or_expr = .{
+                                    .dst_node = block_item_node,
+                                },
+                            },
+                        });
+                        continue :mainloop;
+                    },
+                };
+
+                const extra_start: u32 = @intCast(parser.extra_data.items.len);
+                try parser.extra_data.appendSlice(gpa, parser.scratch.items[scratch_start..]);
+                const extra_end: u32 = @intCast(parser.extra_data.items.len);
+                parser.scratch.shrinkRetainingCapacity(scratch_start);
+
+                parser.nodes.set(data.dst_node, .pack(.{ .block = .{
+                    .start = extra_start,
+                    .end = extra_end,
+                    .closing_brace = closing_brace,
+                } }));
+            },
+            .expect_closing_brace => switch (tokens_kind[parser.tokens_index]) {
+                .brace_r => parser.tokens_index += 1,
+                else => std.debug.panic("TODO: handle missing closing brace", .{}),
+            },
+            .expect_statement_or_expr => |data| switch (tokens_kind[parser.tokens_index]) {
+                else => |t| std.debug.panic("TODO: {t}", .{t}),
+                .whitespace => unreachable,
+                .ident, .number, .paren_l, .brace_l => {
+                    try parser.states.appendSlice(gpa, &[_]State{
+                        .handle_semicolon_after_expr,
+                    } ++ State.expectFullExpr(data.dst_node));
+                },
+            },
+            .expect_expr_primary => |data| {
+                parser.skipWhitespace();
+                switch (tokens_kind[parser.tokens_index]) {
+                    else => unreachable,
+                    .ident, .number => {
+                        parser.nodes.set(data.dst_node, .pack(.{
+                            .value_ref = parser.consumeValueRef(),
+                        }));
+                    },
+                    .paren_l => {
+                        try parser.states.append(gpa, .{
+                            .expect_grouped_start = .{
+                                .dst_node = data.dst_node,
+                            },
+                        });
+                    },
+                    .brace_l => {
+                        parser.tokens_index += 1;
+                        try parser.states.appendSlice(gpa, &.{
+                            .expect_closing_brace,
+                            .{
+                                .expect_block_statements = .{
+                                    .dst_node = data.dst_node,
+                                    .scratch_start = @intCast(parser.scratch.items.len),
+                                },
+                            },
+                        });
+                    },
+                }
+            },
+            .handle_expr_secondary => |data| {
+                parser.skipWhitespace();
+                switch (tokens_kind[parser.tokens_index]) {
+                    else => |tag| std.debug.panic("TODO: {t}", .{tag}),
+                    .whitespace => unreachable,
+                    .eof, .semicolon, .paren_r, .brace_r => {
+                        // do nothing, let the next popped state handle it now that we're done
+                    },
+
+                    .ampersand,
+                    .pipe,
+                    .percent,
+                    .slash,
+
+                    .plus,
+                    .plus_pipe,
+                    .plus_percent,
+
+                    .sub,
+                    .sub_pipe,
+                    .sub_percent,
+
+                    .mul,
+                    .mul_pipe,
+                    .mul_percent,
+                    => {
+                        const rhs_op_tok = parser.tokens_index;
+                        parser.tokens_index += 1;
+                        parser.skipWhitespace();
+                        const rhs_expr_node = try parser.addNode(gpa, undefined);
+                        try parser.states.appendSlice(gpa, &.{
+                            .{
+                                .join_expr_secondary = .{
+                                    .dst_node = data.dst_node,
+                                    .rhs_op_tok = rhs_op_tok,
+                                    .rhs_expr = rhs_expr_node,
+                                },
+                            },
+                            .{
+                                .expect_expr_primary = .{
+                                    .dst_node = rhs_expr_node,
+                                },
+                            },
+                        });
+                    },
+                }
+            },
+            .join_expr_secondary => |data| {
+                parser.skipWhitespace();
+
+                try parser.states.append(gpa, .{
+                    // re-queue until we run into a terminating token
+                    .handle_expr_secondary = .{
+                        .dst_node = data.dst_node,
+                    },
+                });
+
+                const rhs_op_tok = data.rhs_op_tok;
+                const rhs_op_tag = tokens_kind[rhs_op_tok];
+                const rhs_op_info = oper_table.get(rhs_op_tag).?;
+
+                const current_expr = parser.nodes.get(data.dst_node);
+                switch (current_expr.unpack()) {
+                    .null => std.debug.panic("TODO", .{}),
+                    .value_ref, .grouped, .block => {
+                        const lhs_expr_node = try parser.addNode(gpa, current_expr);
+                        parser.nodes.set(data.dst_node, .pack(.{ .bin_op = .{
+                            .lhs = lhs_expr_node,
+                            .op = rhs_op_tok,
+                            .rhs = data.rhs_expr,
+                        } }));
+                        continue :mainloop;
+                    },
+                    .bin_op => {},
+                }
+
+                const BindWhich = enum { lhs, rhs };
+
+                var lhs_bin_op_index: Node.Index = data.dst_node;
+                const bind_which: BindWhich = while (true) {
+                    const lhs_bin_op = parser.nodes.get(lhs_bin_op_index).unpack().bin_op;
+                    const lhs_op_tok = lhs_bin_op.op;
+                    const lhs_op_tag = tokens_kind[lhs_op_tok];
+                    const lhs_op_info = oper_table.get(lhs_op_tag).?;
+                    const bind_which: BindWhich = switch (OperInfo.choose(lhs_op_info, rhs_op_info)) {
+                        .invalid => std.debug.panic("TODO: Handle invalid associativity", .{}),
+                        .lhs => .lhs,
+                        .rhs => .rhs,
+                    };
+                    switch (bind_which) {
+                        .lhs => break .lhs,
+                        .rhs => switch (parser.nodes.items(.tag)[lhs_bin_op.rhs]) {
+                            .null => std.debug.panic("TODO", .{}),
+                            .value_ref, .grouped, .block => break .rhs,
+                            .bin_op => {
+                                lhs_bin_op_index = lhs_bin_op.rhs;
+                                continue;
+                            },
+                        },
+                    }
+                };
+
+                const lhs_bin_op = parser.nodes.get(lhs_bin_op_index).unpack().bin_op;
+
+                switch (bind_which) {
+                    .lhs => {
+                        const lhs_expr_node = try parser.addNode(gpa, .pack(.{ .bin_op = lhs_bin_op }));
+                        const new_bin_op: Node.BinOp = .{
+                            .lhs = lhs_expr_node,
+                            .op = rhs_op_tok,
+                            .rhs = data.rhs_expr,
+                        };
+                        parser.nodes.set(lhs_bin_op_index, .pack(.{ .bin_op = new_bin_op }));
+                    },
+                    .rhs => {
+                        switch (parser.nodes.items(.tag)[lhs_bin_op.rhs]) {
+                            .null => std.debug.panic("TODO", .{}),
+                            .bin_op => unreachable,
+                            .value_ref, .grouped, .block => {},
+                        }
+                        const rhs_outer_expr_node = try parser.addNode(gpa, .pack(.{ .bin_op = .{
+                            .lhs = lhs_bin_op.rhs,
+                            .op = rhs_op_tok,
+                            .rhs = data.rhs_expr,
+                        } }));
+                        parser.nodes.items(.data)[lhs_bin_op_index].rhs = rhs_outer_expr_node;
+                    },
+                }
+            },
+            .expect_grouped_start => |data| {
+                std.debug.assert(tokens_kind[parser.tokens_index] == .paren_l);
+
+                const paren_l = parser.tokens_index;
+                parser.tokens_index += 1;
+                parser.skipWhitespace();
+
+                const inner_expr_node = try parser.addNode(gpa, undefined);
+                try parser.states.appendSlice(gpa, &[_]State{
+                    .{
+                        .expect_grouped_end = .{
+                            .dst_node = data.dst_node,
+                            .paren_l = paren_l,
+                            .inner_expr = inner_expr_node,
+                        },
+                    },
+                } ++ State.expectFullExpr(inner_expr_node));
+            },
+            .expect_grouped_end => |data| switch (tokens_kind[parser.tokens_index]) {
+                else => unreachable,
+                .eof, .brace_r, .semicolon => std.debug.panic("TODO: handle unclosed paren", .{}),
+                .paren_r => {
+                    const paren_r = parser.tokens_index;
+                    parser.tokens_index += 1;
+                    parser.nodes.set(data.dst_node, .pack(.{ .grouped = .{
+                        .expr = data.inner_expr,
+                        .paren_l = data.paren_l,
+                        .paren_r = paren_r,
+                    } }));
+                },
+            },
+            .handle_semicolon_after_expr => {
+                if (tokens_kind[parser.tokens_index] == .semicolon) {
+                    parser.tokens_index += 1;
+                }
+            },
+        };
+
+        const block = parser.nodes.get(root_node).unpack().block;
+        if (parser.tokens.list.get(block.closing_brace).kind != .eof) {
+            std.debug.panic("TODO: handle trailing rbrace", .{});
+        }
+    }
+
+    const State = union(enum) {
+        expect_block_statements: struct {
+            dst_node: Node.Index,
+            scratch_start: u32,
+        },
+        expect_closing_brace,
+        expect_statement_or_expr: struct {
+            dst_node: Node.Index,
+        },
+        expect_expr_primary: struct {
+            dst_node: Node.Index,
+        },
+        handle_expr_secondary: struct {
+            dst_node: Node.Index,
+        },
+        join_expr_secondary: struct {
+            dst_node: Node.Index,
+            rhs_op_tok: Tokens.Value.Index,
+            rhs_expr: Node.Index,
+        },
+        expect_grouped_start: struct {
+            dst_node: Node.Index,
+        },
+        expect_grouped_end: struct {
+            dst_node: Node.Index,
+            paren_l: Tokens.Value.Index,
+            inner_expr: Node.Index,
+        },
+        handle_semicolon_after_expr,
+
+        fn expectFullExpr(dst_node: Node.Index) [2]State {
+            return .{
+                .{
+                    .handle_expr_secondary = .{
+                        .dst_node = dst_node,
+                    },
+                },
+                .{
+                    .expect_expr_primary = .{
+                        .dst_node = dst_node,
+                    },
+                },
+            };
+        }
+    };
 
     /// Assumes `self.tokens_index < self.tokens.list.len`.
     fn skipWhitespace(self: *Parser) void {
@@ -410,7 +822,7 @@ const Parser = struct {
     fn addNode(
         self: *const Parser,
         gpa: std.mem.Allocator,
-        node: Node,
+        node: Node.Packed,
     ) std.mem.Allocator.Error!Node.Index {
         try self.nodes.ensureUnusedCapacity(gpa, 1);
         return self.addNodeAssumeCapacity(node);
@@ -418,238 +830,25 @@ const Parser = struct {
 
     fn addNodeAssumeCapacity(
         self: *const Parser,
-        node: Node,
+        node: Node.Packed,
     ) Node.Index {
         const index = self.nodes.addOneAssumeCapacity();
-        self.nodes.set(index, .pack(node));
+        self.nodes.set(index, node);
         return @intCast(index);
     }
 
-    /// Same as `eatAndAddValueRefAssumeCapacity` but allocates automatically.
-    fn eatAndAddValueRef(
-        self: *Parser,
-        gpa: std.mem.Allocator,
-    ) std.mem.Allocator.Error!Node.Index {
-        try self.nodes.ensureUnusedCapacity(gpa, 1);
-        return self.eatAndAddValueRefAssumeCapacity();
-    }
-
-    /// On success, increments `self.tokens_index` by one, after returning a value ref node index pointing to the current token.
-    /// Asserts the current token is either of kind `ident` or `number`.
-    fn eatAndAddValueRefAssumeCapacity(
-        self: *Parser,
-    ) Node.Index {
+    fn consumeValueRef(self: *Parser) Node.ValueRef {
         const tokens_kind: []const Lexer.Token.Kind = self.tokens.list.items(.kind);
         switch (tokens_kind[self.tokens_index]) {
             .ident, .number => {},
             else => unreachable,
         }
-        const value_ref_node = self.addNodeAssumeCapacity(.{
-            .value_ref = .{
-                .main_token = self.tokens_index,
-            },
-        });
-        self.tokens_index += 1;
-        return value_ref_node;
-    }
-
-    pub fn expectStatementOrExpr(
-        self: *Parser,
-        gpa: std.mem.Allocator,
-    ) (ParseError || std.mem.Allocator.Error)!?Node.Index {
-        const tokens_kind: []const Lexer.Token.Kind = self.tokens.list.items(.kind);
-
-        self.skipWhitespace();
-        switch (tokens_kind[self.tokens_index]) {
-            else => |t| std.debug.panic("TODO: {t}", .{t}),
-            .whitespace => unreachable,
-
-            .eof => return null,
-            .semicolon => {
-                std.debug.panic("TODO: gracefully report unneeded semicolon.", .{});
-            },
-            .ident, .number, .paren_l => {
-                return try self.expectExpr(gpa);
-            },
-        }
-    }
-
-    const OperInfo = struct {
-        prec: u32,
-        assoc: enum { none, left, right },
-    };
-    const oper_table: std.EnumMap(Lexer.Token.Kind, OperInfo) = .init(.{
-        .ampersand = .{ .prec = 1, .assoc = .left },
-        .pipe = .{ .prec = 1, .assoc = .left },
-        .percent = .{ .prec = 2, .assoc = .left },
-        .slash = .{ .prec = 2, .assoc = .left },
-
-        .plus = .{ .prec = 1, .assoc = .left },
-        .plus_pipe = .{ .prec = 1, .assoc = .left },
-        .plus_percent = .{ .prec = 1, .assoc = .left },
-
-        .sub = .{ .prec = 1, .assoc = .left },
-        .sub_pipe = .{ .prec = 1, .assoc = .left },
-        .sub_percent = .{ .prec = 1, .assoc = .left },
-
-        .mul = .{ .prec = 2, .assoc = .left },
-        .mul_pipe = .{ .prec = 2, .assoc = .left },
-        .mul_percent = .{ .prec = 2, .assoc = .left },
-    });
-
-    fn expectExpr(
-        self: *Parser,
-        gpa: std.mem.Allocator,
-    ) (ParseError || std.mem.Allocator.Error)!?Node.Index {
-        const tokens_kind: []const Lexer.Token.Kind = self.tokens.list.items(.kind);
-
-        const scratch_start = self.scratch.items.len;
-        defer self.scratch.shrinkRetainingCapacity(scratch_start);
-        defer std.debug.assert(self.scratch.items.len >= scratch_start);
-        try self.scratch.ensureUnusedCapacity(gpa, 1);
-
-        self.skipWhitespace();
-        while (true) switch (tokens_kind[self.tokens_index]) {
-            else => |tag| std.debug.panic("TODO: {t}", .{tag}),
-            .whitespace => unreachable,
-            .eof => break,
-            .semicolon => {
-                self.tokens_index += 1;
-                break;
-            },
-
-            .paren_l => std.debug.panic("TODO", .{}),
-            .ident, .number => append_ref: {
-                try self.scratch.ensureUnusedCapacity(gpa, 1);
-                const ref_node = try self.eatAndAddValueRef(gpa);
-                self.skipWhitespace();
-
-                if (self.scratch.items.len == scratch_start) {
-                    self.scratch.appendAssumeCapacity(ref_node);
-                    break :append_ref;
-                }
-                const prev_node: Node.Index = self.scratch.pop().?;
-                switch (self.nodes.get(prev_node).unpack()) {
-                    else => |lhs_node_unpacked| std.debug.panic("TODO: {}", .{lhs_node_unpacked}),
-                    .bin_op => {
-                        const innermost = getInnerMostBinOpRhs(self.nodes.slice(), prev_node).?;
-                        if (self.nodes.get(innermost).unpack().bin_op.rhs != Node.null_index) {
-                            std.debug.panic("TODO: gracefully report bad syntax", .{});
-                        }
-                        self.nodes.items(.data)[innermost].rhs = ref_node;
-                        self.scratch.appendAssumeCapacity(prev_node);
-                    },
-                }
-            },
-
-            .ampersand,
-            .pipe,
-            .percent,
-            .slash,
-
-            .plus,
-            .plus_pipe,
-            .plus_percent,
-
-            .sub,
-            .sub_pipe,
-            .sub_percent,
-
-            .mul,
-            .mul_pipe,
-            .mul_percent,
-            => |op_tag| {
-                const op_tok = self.tokens_index;
-                const op_info = oper_table.get(op_tag).?;
-                self.tokens_index += 1;
-                self.skipWhitespace();
-
-                try self.nodes.ensureUnusedCapacity(gpa, 1);
-
-                if (self.scratch.items.len == scratch_start) {
-                    std.debug.panic("TODO: binary op without lhs operand", .{});
-                }
-                const lhs_node: Node.Index = self.scratch.pop().?;
-
-                switch (self.nodes.get(lhs_node).unpack()) {
-                    else => |lhs_node_unpacked| std.debug.panic("TODO: {}", .{lhs_node_unpacked}),
-                    .value_ref => {
-                        self.scratch.appendAssumeCapacity(self.addNodeAssumeCapacity(.{ .bin_op = .{
-                            .lhs = lhs_node,
-                            .op = op_tok,
-                            .rhs = Node.null_index,
-                        } }));
-                    },
-                    .bin_op => |lhs_bin_op| {
-                        const lhs_op_tok = lhs_bin_op.op;
-                        const lhs_op_tag = tokens_kind[lhs_op_tok];
-                        const lhs_op_info = oper_table.get(lhs_op_tag).?;
-
-                        if (lhs_bin_op.rhs == Node.null_index) {
-                            std.debug.panic("TODO: gracefully report chained binary ops without operand in the middle syntax error", .{});
-                        }
-
-                        const bind_which: enum { left, right } = switch (std.math.order(lhs_op_info.prec, op_info.prec)) {
-                            .eq => blk: {
-                                if (lhs_op_info.assoc != op_info.assoc) {
-                                    std.debug.panic("TODO: incompatible associativity", .{});
-                                }
-                                break :blk switch (lhs_op_info.assoc) {
-                                    .none => std.debug.panic("TODO: disallowed associativity", .{}),
-                                    .left => .left,
-                                    .right => .right,
-                                };
-                            },
-                            .lt => .right,
-                            .gt => .left,
-                        };
-
-                        switch (bind_which) {
-                            .left => {
-                                self.scratch.appendAssumeCapacity(self.addNodeAssumeCapacity(.{ .bin_op = .{
-                                    .lhs = lhs_node,
-                                    .op = op_tok,
-                                    .rhs = Node.null_index,
-                                } }));
-                            },
-                            .right => {
-                                self.nodes.items(.data)[lhs_node].rhs = self.addNodeAssumeCapacity(.{ .bin_op = .{
-                                    .lhs = lhs_bin_op.rhs,
-                                    .op = op_tok,
-                                    .rhs = Node.null_index,
-                                } });
-                            },
-                        }
-                    },
-                }
-            },
+        defer self.tokens_index += 1;
+        return .{
+            .main_token = self.tokens_index,
         };
-
-        if (self.scratch.items.len == scratch_start) return null;
-        std.debug.assert(self.scratch.items.len == scratch_start + 1);
-        return self.scratch.getLastOrNull().?;
     }
 };
-
-/// Returns null if `outermost` isn't a `bin_op`.
-/// Otherwise, returns the node index for the rightmost nested bin_op in the binop tree.
-fn getInnerMostBinOpRhs(
-    nodes: Node.Packed.List.Slice,
-    outermost: Node.Index,
-) ?Node.Index {
-    const nodes_tag: []const Node.Tag = nodes.items(.tag);
-    if (nodes_tag[outermost] != .bin_op) return null;
-
-    var current: Node.Index = outermost;
-    while (true) {
-        const data = nodes.get(current).unpack().bin_op;
-        if (data.rhs == Node.null_index) break;
-        if (nodes_tag[data.rhs] != .bin_op) break;
-        current = data.rhs;
-    }
-
-    return current;
-}
 
 test Ast {
     const gpa = std.testing.allocator;
