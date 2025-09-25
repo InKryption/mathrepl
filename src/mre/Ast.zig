@@ -18,6 +18,7 @@ pub const Node = union(enum(u8)) {
     null: struct { Tokens.Value.Index, Packed.Data },
     value_ref: ValueRef,
     grouped: Grouped,
+    un_op: UnOp,
     bin_op: BinOp,
     block: Block,
 
@@ -51,9 +52,24 @@ pub const Node = union(enum(u8)) {
         main_token: Tokens.Value.Index,
         unused_data: Packed.Data = .init(0, 0),
 
+        pub const Kind = enum { ident, number };
+
+        pub fn getKind(ref: ValueRef, tokens: Tokens) Kind {
+            const tok = ref.getRawToken(tokens);
+            return switch (tok.kind) {
+                .ident => .ident,
+                .number => .number,
+                else => unreachable, // bad value ref
+            };
+        }
+
         pub fn getSrc(ref: ValueRef, tokens: Tokens) []const u8 {
-            const tok = tokens.list.get(ref.main_token);
+            const tok = ref.getRawToken(tokens);
             return tok.loc.getSrc(tokens.src.slice());
+        }
+
+        pub fn getRawToken(ref: ValueRef, tokens: Tokens) Tokens.Value {
+            return tokens.list.get(ref.main_token);
         }
 
         pub fn unpack(main_token: Tokens.Value.Index, data: Packed.Data) ValueRef {
@@ -65,6 +81,24 @@ pub const Node = union(enum(u8)) {
 
         pub fn pack(ref: ValueRef) struct { Tokens.Value.Index, Packed.Data } {
             return .{ ref.main_token, ref.unused_data };
+        }
+    };
+
+    pub const UnOp = struct {
+        op: Tokens.Value.Index,
+        operand: Node.Index,
+        unused_rhs: u32 = 0,
+
+        pub fn unpack(main_token: Tokens.Value.Index, data: Packed.Data) UnOp {
+            return .{
+                .op = main_token,
+                .operand = .fromInt(data.lhs),
+                .unused_rhs = data.rhs,
+            };
+        }
+
+        pub fn pack(un_op: UnOp) struct { Tokens.Value.Index, Packed.Data } {
+            return .{ un_op.op, .init(un_op.operand.toInt().?, un_op.unused_rhs) };
         }
     };
 
@@ -82,7 +116,7 @@ pub const Node = union(enum(u8)) {
         }
 
         pub fn pack(bin_op: BinOp) struct { Tokens.Value.Index, Packed.Data } {
-            return .{ bin_op.op, .init(bin_op.lhs.toIntAllowRoot(), bin_op.rhs.toIntAllowRoot()) };
+            return .{ bin_op.op, .init(bin_op.lhs.toInt().?, bin_op.rhs.toInt().?) };
         }
     };
 
@@ -100,7 +134,7 @@ pub const Node = union(enum(u8)) {
         }
 
         pub fn pack(grouped: Grouped) struct { Tokens.Value.Index, Packed.Data } {
-            return .{ grouped.paren_l, .init(grouped.expr.toIntAllowRoot(), grouped.paren_r) };
+            return .{ grouped.paren_l, .init(grouped.expr.toInt().?, grouped.paren_r) };
         }
     };
 
@@ -253,31 +287,34 @@ pub const NodeFmt = struct {
 
         const Pending = packed struct(u64) {
             node: Node.Index,
+            need_prec_paren: bool,
             state: packed union {
-                const initial: u32 = 0;
-                raw: enum(u32) {
+                const Int = u31;
+                const initial: Int = 0;
+                raw: enum(Int) {
                     initial = initial,
                     _,
                 },
-                grouped: enum(u32) {
+                grouped: enum(Int) {
                     start = initial,
                     end,
                     _,
                 },
-                bin_op: enum(u32) {
+                bin_op: enum(Int) {
                     start = initial,
                     op,
                     close_precedence_delim,
                     _,
                 },
-                block: packed struct(u32) {
-                    index: u32 = initial,
+                block: packed struct(Int) {
+                    index: Int = initial,
                 },
             },
         };
         var pending_stack: std.ArrayList(Pending) = .initBuffer(@ptrCast(params.walk_buffer));
         pending_stack.appendBounded(.{
             .node = params.node,
+            .need_prec_paren = false,
             .state = .{ .raw = .initial },
         }) catch {
             try w.writeAll(options.truncated_str);
@@ -288,8 +325,12 @@ pub const NodeFmt = struct {
             const pending: Pending = pending_stack.pop() orelse break;
             const pending_node = self.ast.nodes.get(pending.node.toIntAllowRoot());
             switch (pending_node.unpack()) {
-                .null => try w.writeAll("<null>"),
+                .null => {
+                    std.debug.assert(pending.state.raw == .initial);
+                    try w.writeAll("<null>");
+                },
                 .value_ref => |value_ref| {
+                    std.debug.assert(pending.state.raw == .initial);
                     const src = value_ref.getSrc(self.tokens);
                     try w.print("{f}", .{std.zig.fmtString(src)});
                 },
@@ -298,10 +339,12 @@ pub const NodeFmt = struct {
                         pending_stack.appendSliceBounded(&.{
                             .{
                                 .node = pending.node,
+                                .need_prec_paren = false,
                                 .state = .{ .grouped = .end },
                             },
                             .{
                                 .node = grouped.expr,
+                                .need_prec_paren = false,
                                 .state = .{ .raw = .initial },
                             },
                         }) catch {
@@ -315,9 +358,20 @@ pub const NodeFmt = struct {
                     },
                     _ => unreachable,
                 },
+                .un_op => |un| {
+                    std.debug.assert(pending.state.raw == .initial);
+                    const op_tok = self.tokens.list.get(un.op);
+                    const op_str = op_tok.loc.getSrc(self.tokens.src.slice());
+                    try w.writeAll(op_str);
+                    pending_stack.appendAssumeCapacity(.{
+                        .node = un.operand,
+                        .need_prec_paren = false,
+                        .state = .{ .raw = .initial },
+                    });
+                },
                 .bin_op => |bin_op| bin_op_sw: switch (pending.state.bin_op) {
                     .start => {
-                        if (pending.node != params.node) {
+                        if (pending.need_prec_paren) {
                             if (options.precedence_delims) |delims| {
                                 const start_delim, _ = delims;
                                 try w.writeAll(start_delim);
@@ -326,10 +380,12 @@ pub const NodeFmt = struct {
                         pending_stack.appendSliceBounded(&.{
                             .{
                                 .node = pending.node,
+                                .need_prec_paren = pending.need_prec_paren,
                                 .state = .{ .bin_op = .op },
                             },
                             .{
                                 .node = bin_op.lhs,
+                                .need_prec_paren = true,
                                 .state = .{ .raw = .initial },
                             },
                         }) catch {
@@ -349,16 +405,18 @@ pub const NodeFmt = struct {
                         pending_stack.appendSliceAssumeCapacity(&.{
                             .{
                                 .node = pending.node,
+                                .need_prec_paren = pending.need_prec_paren,
                                 .state = .{ .bin_op = .close_precedence_delim },
                             },
                             .{
                                 .node = bin_op.rhs,
+                                .need_prec_paren = true,
                                 .state = .{ .raw = .initial },
                             },
                         });
                     },
                     .close_precedence_delim => {
-                        if (pending.node != params.node) {
+                        if (pending.need_prec_paren) {
                             if (options.precedence_delims) |delims| {
                                 _, const end_delim = delims;
                                 try w.writeAll(end_delim);
@@ -398,10 +456,12 @@ pub const NodeFmt = struct {
                     pending_stack.appendSliceBounded(&.{
                         .{
                             .node = pending.node,
+                            .need_prec_paren = false,
                             .state = .{ .block = state },
                         },
                         .{
                             .node = target_node,
+                            .need_prec_paren = false,
                             .state = .{ .raw = .initial },
                         },
                     }) catch {
@@ -578,23 +638,52 @@ const Parser = struct {
             .expect_statement_or_expr => |data| switch (tokens_kind[parser.tokens_index]) {
                 else => |t| std.debug.panic("TODO: {t}", .{t}),
                 .whitespace => unreachable,
-                .ident, .number, .paren_l, .brace_l => {
+                .ident,
+                .number,
+                .paren_l,
+                .brace_l,
+                .sub,
+                .sub_pipe,
+                .sub_percent,
+                => {
                     try parser.states.appendSlice(gpa, &[_]State{
                         .handle_semicolon_after_expr,
                     } ++ State.expectFullExpr(data.dst_node));
                 },
             },
             .expect_expr_primary => |data| {
-                parser.skipWhitespace();
-                switch (tokens_kind[parser.tokens_index]) {
+                sw: switch (tokens_kind[parser.tokens_index]) {
                     else => unreachable,
+                    .whitespace => {
+                        parser.skipWhitespace();
+                        continue :sw tokens_kind[parser.tokens_index];
+                    },
+                    .sub, .sub_pipe, .sub_percent => {
+                        const op_tok = parser.tokens_index;
+                        parser.tokens_index += 1;
+
+                        if (tokens_kind[parser.tokens_index] == .whitespace) {
+                            std.debug.panic("TODO: whitespace in between unary operator and operand.", .{});
+                        }
+
+                        const operand_node = try parser.addNode(gpa, undefined);
+                        parser.nodes.set(data.dst_node.toInt().?, .pack(.{ .un_op = .{
+                            .op = op_tok,
+                            .operand = operand_node,
+                        } }));
+                        parser.states.appendAssumeCapacity(.{
+                            .expect_expr_primary = .{
+                                .dst_node = operand_node,
+                            },
+                        });
+                    },
                     .ident, .number => {
                         parser.nodes.set(data.dst_node.toInt().?, .pack(.{
                             .value_ref = parser.consumeValueRef(),
                         }));
                     },
                     .paren_l => {
-                        try parser.states.append(gpa, .{
+                        parser.states.appendAssumeCapacity(.{
                             .expect_grouped_start = .{
                                 .dst_node = data.dst_node,
                             },
@@ -678,7 +767,7 @@ const Parser = struct {
                 const current_expr = parser.nodes.get(data.dst_node.toInt().?);
                 switch (current_expr.unpack()) {
                     .null => std.debug.panic("TODO", .{}),
-                    .value_ref, .grouped, .block => {
+                    .value_ref, .grouped, .block, .un_op => {
                         const lhs_expr_node = try parser.addNode(gpa, current_expr);
                         parser.nodes.set(data.dst_node.toInt().?, .pack(.{ .bin_op = .{
                             .lhs = lhs_expr_node,
@@ -707,7 +796,7 @@ const Parser = struct {
                         .lhs => break .lhs,
                         .rhs => switch (parser.nodes.items(.tag)[lhs_bin_op.rhs.toInt().?]) {
                             .null => std.debug.panic("TODO", .{}),
-                            .value_ref, .grouped, .block => break .rhs,
+                            .value_ref, .grouped, .block, .un_op => break .rhs,
                             .bin_op => {
                                 lhs_bin_op_index = lhs_bin_op.rhs;
                                 continue;
@@ -732,7 +821,7 @@ const Parser = struct {
                         switch (parser.nodes.items(.tag)[lhs_bin_op.rhs.toInt().?]) {
                             .null => std.debug.panic("TODO", .{}),
                             .bin_op => unreachable,
-                            .value_ref, .grouped, .block => {},
+                            .value_ref, .grouped, .block, .un_op => {},
                         }
                         const rhs_outer_expr_node = try parser.addNode(gpa, .pack(.{ .bin_op = .{
                             .lhs = lhs_bin_op.rhs,
