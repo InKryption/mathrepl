@@ -105,7 +105,7 @@ pub fn main() !void {
             var stdout_writer = std.fs.File.stdout().writer(&.{});
             var walk_buffer: [32]u64 = undefined;
             try stdout_writer.interface.print("fmt: {f}\n", .{ast.nodeFmt(tokens, .{
-                .node = 0,
+                .node = .root,
                 .walk_buffer = &walk_buffer,
                 .options = .default,
             })});

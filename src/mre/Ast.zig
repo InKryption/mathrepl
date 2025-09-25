@@ -24,9 +24,28 @@ pub const Node = union(enum(u8)) {
     pub const null_init: Node = .{ .null = .{ 0, .init(0, 0) } };
 
     pub const Tag = @typeInfo(Node).@"union".tag_type.?;
-    pub const Index = u32;
-    pub const root_index: Index = 0;
-    pub const null_index: Index = root_index;
+    pub const Index = enum(Int) {
+        pub const Int = u32;
+        null = 0,
+        _,
+
+        pub const root: Index = .null;
+
+        pub fn fromInt(index: Int) Index {
+            return @enumFromInt(index);
+        }
+
+        pub fn toInt(self: Index) ?Int {
+            return switch (self) {
+                .null => null,
+                _ => |value| @intFromEnum(value),
+            };
+        }
+
+        pub fn toIntAllowRoot(self: Index) Int {
+            return @intFromEnum(self);
+        }
+    };
 
     pub const ValueRef = struct {
         main_token: Tokens.Value.Index,
@@ -56,14 +75,14 @@ pub const Node = union(enum(u8)) {
 
         pub fn unpack(main_token: Tokens.Value.Index, data: Packed.Data) BinOp {
             return .{
-                .lhs = data.lhs,
+                .lhs = .fromInt(data.lhs),
                 .op = main_token,
-                .rhs = data.rhs,
+                .rhs = .fromInt(data.rhs),
             };
         }
 
         pub fn pack(bin_op: BinOp) struct { Tokens.Value.Index, Packed.Data } {
-            return .{ bin_op.op, .init(bin_op.lhs, bin_op.rhs) };
+            return .{ bin_op.op, .init(bin_op.lhs.toIntAllowRoot(), bin_op.rhs.toIntAllowRoot()) };
         }
     };
 
@@ -74,14 +93,14 @@ pub const Node = union(enum(u8)) {
 
         pub fn unpack(main_token: Tokens.Value.Index, data: Packed.Data) Grouped {
             return .{
-                .expr = data.lhs,
+                .expr = .fromInt(data.lhs),
                 .paren_l = main_token,
                 .paren_r = data.rhs,
             };
         }
 
         pub fn pack(grouped: Grouped) struct { Tokens.Value.Index, Packed.Data } {
-            return .{ grouped.paren_l, .init(grouped.expr, grouped.paren_r) };
+            return .{ grouped.paren_l, .init(grouped.expr.toIntAllowRoot(), grouped.paren_r) };
         }
     };
 
@@ -95,8 +114,12 @@ pub const Node = union(enum(u8)) {
             return block.end - block.start;
         }
 
-        pub fn getNodes(block: Block, ast: Ast) []const Node.Index {
-            return ast.extra_data[block.start..block.end];
+        pub fn getNodes(
+            block: Block,
+            /// The `extra_data` field of `Ast`.
+            extra_data: []const u32,
+        ) []const Node.Index {
+            return @ptrCast(extra_data[block.start..block.end]);
         }
 
         pub fn unpack(main_token: Tokens.Value.Index, data: Packed.Data) Block {
@@ -263,7 +286,7 @@ pub const NodeFmt = struct {
         var indent: u32 = 0;
         while (true) {
             const pending: Pending = pending_stack.pop() orelse break;
-            const pending_node = self.ast.nodes.get(pending.node);
+            const pending_node = self.ast.nodes.get(pending.node.toIntAllowRoot());
             switch (pending_node.unpack()) {
                 .null => try w.writeAll("<null>"),
                 .value_ref => |value_ref| {
@@ -348,7 +371,7 @@ pub const NodeFmt = struct {
                     const four_spaces = " " ** 4;
 
                     var state = pending.state.block;
-                    const block_nodes = block.getNodes(self.ast);
+                    const block_nodes = block.getNodes(self.ast.extra_data);
                     if (block_nodes.len == 0) {
                         std.debug.assert(state.index == 0);
                         try w.writeAll("{}");
@@ -507,7 +530,7 @@ const Parser = struct {
         const tokens_kind: []const Lexer.Token.Kind = parser.tokens.list.items(.kind);
 
         const root_node = try parser.addNode(gpa, undefined);
-        std.debug.assert(root_node == Node.root_index);
+        std.debug.assert(root_node == Node.Index.root);
 
         try parser.states.append(gpa, .{ .expect_block_statements = .{
             .dst_node = root_node,
@@ -524,7 +547,7 @@ const Parser = struct {
                     .eof, .brace_r => parser.tokens_index,
                     else => {
                         const block_item_node = try parser.addNode(gpa, undefined);
-                        try parser.scratch.append(gpa, block_item_node);
+                        try parser.scratch.append(gpa, block_item_node.toInt().?);
                         try parser.states.appendSlice(gpa, &.{
                             .{ .expect_block_statements = data },
                             .{
@@ -542,7 +565,7 @@ const Parser = struct {
                 const extra_end: u32 = @intCast(parser.extra_data.items.len);
                 parser.scratch.shrinkRetainingCapacity(scratch_start);
 
-                parser.nodes.set(data.dst_node, .pack(.{ .block = .{
+                parser.nodes.set(data.dst_node.toIntAllowRoot(), .pack(.{ .block = .{
                     .start = extra_start,
                     .end = extra_end,
                     .closing_brace = closing_brace,
@@ -566,7 +589,7 @@ const Parser = struct {
                 switch (tokens_kind[parser.tokens_index]) {
                     else => unreachable,
                     .ident, .number => {
-                        parser.nodes.set(data.dst_node, .pack(.{
+                        parser.nodes.set(data.dst_node.toInt().?, .pack(.{
                             .value_ref = parser.consumeValueRef(),
                         }));
                     },
@@ -652,12 +675,12 @@ const Parser = struct {
                 const rhs_op_tag = tokens_kind[rhs_op_tok];
                 const rhs_op_info = oper_table.get(rhs_op_tag).?;
 
-                const current_expr = parser.nodes.get(data.dst_node);
+                const current_expr = parser.nodes.get(data.dst_node.toInt().?);
                 switch (current_expr.unpack()) {
                     .null => std.debug.panic("TODO", .{}),
                     .value_ref, .grouped, .block => {
                         const lhs_expr_node = try parser.addNode(gpa, current_expr);
-                        parser.nodes.set(data.dst_node, .pack(.{ .bin_op = .{
+                        parser.nodes.set(data.dst_node.toInt().?, .pack(.{ .bin_op = .{
                             .lhs = lhs_expr_node,
                             .op = rhs_op_tok,
                             .rhs = data.rhs_expr,
@@ -671,7 +694,7 @@ const Parser = struct {
 
                 var lhs_bin_op_index: Node.Index = data.dst_node;
                 const bind_which: BindWhich = while (true) {
-                    const lhs_bin_op = parser.nodes.get(lhs_bin_op_index).unpack().bin_op;
+                    const lhs_bin_op = parser.nodes.get(lhs_bin_op_index.toInt().?).unpack().bin_op;
                     const lhs_op_tok = lhs_bin_op.op;
                     const lhs_op_tag = tokens_kind[lhs_op_tok];
                     const lhs_op_info = oper_table.get(lhs_op_tag).?;
@@ -682,7 +705,7 @@ const Parser = struct {
                     };
                     switch (bind_which) {
                         .lhs => break .lhs,
-                        .rhs => switch (parser.nodes.items(.tag)[lhs_bin_op.rhs]) {
+                        .rhs => switch (parser.nodes.items(.tag)[lhs_bin_op.rhs.toInt().?]) {
                             .null => std.debug.panic("TODO", .{}),
                             .value_ref, .grouped, .block => break .rhs,
                             .bin_op => {
@@ -693,7 +716,7 @@ const Parser = struct {
                     }
                 };
 
-                const lhs_bin_op = parser.nodes.get(lhs_bin_op_index).unpack().bin_op;
+                const lhs_bin_op = parser.nodes.get(lhs_bin_op_index.toInt().?).unpack().bin_op;
 
                 switch (bind_which) {
                     .lhs => {
@@ -703,10 +726,10 @@ const Parser = struct {
                             .op = rhs_op_tok,
                             .rhs = data.rhs_expr,
                         };
-                        parser.nodes.set(lhs_bin_op_index, .pack(.{ .bin_op = new_bin_op }));
+                        parser.nodes.set(lhs_bin_op_index.toInt().?, .pack(.{ .bin_op = new_bin_op }));
                     },
                     .rhs => {
-                        switch (parser.nodes.items(.tag)[lhs_bin_op.rhs]) {
+                        switch (parser.nodes.items(.tag)[lhs_bin_op.rhs.toInt().?]) {
                             .null => std.debug.panic("TODO", .{}),
                             .bin_op => unreachable,
                             .value_ref, .grouped, .block => {},
@@ -716,7 +739,7 @@ const Parser = struct {
                             .op = rhs_op_tok,
                             .rhs = data.rhs_expr,
                         } }));
-                        parser.nodes.items(.data)[lhs_bin_op_index].rhs = rhs_outer_expr_node;
+                        parser.nodes.items(.data)[lhs_bin_op_index.toInt().?].rhs = rhs_outer_expr_node.toInt().?;
                     },
                 }
             },
@@ -744,7 +767,7 @@ const Parser = struct {
                 .paren_r => {
                     const paren_r = parser.tokens_index;
                     parser.tokens_index += 1;
-                    parser.nodes.set(data.dst_node, .pack(.{ .grouped = .{
+                    parser.nodes.set(data.dst_node.toInt().?, .pack(.{ .grouped = .{
                         .expr = data.inner_expr,
                         .paren_l = data.paren_l,
                         .paren_r = paren_r,
@@ -758,7 +781,7 @@ const Parser = struct {
             },
         };
 
-        const block = parser.nodes.get(root_node).unpack().block;
+        const block = parser.nodes.get(root_node.toIntAllowRoot()).unpack().block;
         if (parser.tokens.list.get(block.closing_brace).kind != .eof) {
             std.debug.panic("TODO: handle trailing rbrace", .{});
         }
@@ -834,7 +857,7 @@ const Parser = struct {
     ) Node.Index {
         const index = self.nodes.addOneAssumeCapacity();
         self.nodes.set(index, node);
-        return @intCast(index);
+        return .fromInt(@intCast(index));
     }
 
     fn consumeValueRef(self: *Parser) Node.ValueRef {
