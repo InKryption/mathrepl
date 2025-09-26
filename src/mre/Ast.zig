@@ -192,13 +192,13 @@ pub const Node = union(enum(u8)) {
             };
         }
 
-        pub fn pack(self: Node) Packed {
-            const main_token: Tokens.Value.Index, const data: Data = switch (self) {
+        pub fn pack(node: Node) Packed {
+            const main_token: Tokens.Value.Index, const data: Data = switch (node) {
                 .null => |unused| unused,
                 inline else => |pl| pl.pack(),
             };
             return .{
-                .tag = self,
+                .tag = node,
                 .main_token = main_token,
                 .data = data,
             };
@@ -658,7 +658,7 @@ const Parser = struct {
                         parser.skipWhitespace();
                         continue :sw tokens_kind[parser.tokens_index];
                     },
-                    .sub, .sub_pipe, .sub_percent => {
+                    .sub, .sub_percent => {
                         const op_tok = parser.tokens_index;
                         parser.tokens_index += 1;
 

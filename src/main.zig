@@ -81,7 +81,7 @@ pub fn main() !void {
     defer std.process.argsFree(gpa, argv);
 
     const cmd: Cmd = try .parse(argv[1..]);
-    std.log.info("{}", .{cmd});
+    std.log.debug("{}", .{cmd});
 
     switch (cmd.input) {
         inline .eval, .run => |expr_or_path, tag| {
@@ -102,14 +102,12 @@ pub fn main() !void {
             const ast = try mre.Ast.parse(gpa, tokens);
             defer ast.deinit(gpa);
 
-            var stdout_writer = std.fs.File.stdout().writer(&.{});
             var walk_buffer: [32]u64 = undefined;
-            try stdout_writer.interface.print("fmt: {f}\n", .{ast.nodeFmt(tokens, .{
+            std.log.err("fmt: {f}\n", .{ast.nodeFmt(tokens, .{
                 .node = .root,
                 .walk_buffer = &walk_buffer,
-                .options = .default,
+                .options = .default_prec_delim,
             })});
-            try stdout_writer.interface.flush();
         },
         .repl => {
             std.log.err("TODO: implement repl", .{});
