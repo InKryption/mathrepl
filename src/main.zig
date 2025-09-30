@@ -112,8 +112,8 @@ pub fn main() !void {
             const ir: mre.Ir = try .generate(gpa, tokens, ast);
             defer ir.deinit(gpa);
 
-            std.log.err("root tags: {any}", .{ir.insts.items(.tags)[0..ir.root_end]});
-            std.log.err("all tags: {any}", .{ir.insts.items(.tags)});
+            std.log.err("root tags: {any}", .{ir.insts.items(.tag)[0..ir.root_end]});
+            std.log.err("all tags: {any}", .{ir.insts.items(.tag)});
         },
         .repl => {
             std.log.err("TODO: implement repl", .{});

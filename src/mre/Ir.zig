@@ -11,7 +11,7 @@ const Ast = mre.Ast;
 const BigIntLimb = std.math.big.Limb;
 
 const Ir = @This();
-insts: Inst.List.Slice,
+insts: Inst.Packed.List.Slice,
 root_end: u32,
 extra_data: []const u32,
 big_int_limbs: []const BigIntLimb,
@@ -23,7 +23,7 @@ pub fn deinit(ir: Ir, gpa: std.mem.Allocator) void {
     gpa.free(ir.big_int_limbs);
 }
 
-pub const Inst = union(enum(u8)) {
+pub const Inst = union(Tag) {
     int_pos: u64,
     int_neg: i64,
     int_big: IntBig,
@@ -43,21 +43,6 @@ pub const Inst = union(enum(u8)) {
     mul_wrap: BinOp,
     mul_saturate: BinOp,
 
-    pub const Tag = @typeInfo(Inst).@"union".tag_type.?;
-
-    comptime {
-        const ExternInst = @Type(.{ .@"union" = .{
-            .layout = .@"extern",
-            .tag_type = null,
-            .fields = @typeInfo(Inst).@"union".fields,
-            .decls = &.{},
-        } });
-        if (@sizeOf(ExternInst) != 8) @compileError(
-            std.fmt.comptimePrint("Wrong size '{d}'", .{@sizeOf(ExternInst)}),
-        );
-    }
-
-    pub const List = std.MultiArrayList(Inst);
     pub const Index = enum(Int) {
         pub const Int = u32;
         null = std.math.maxInt(Int),
@@ -72,6 +57,79 @@ pub const Inst = union(enum(u8)) {
             return switch (self) {
                 .null => null,
                 _ => |value| @intFromEnum(value),
+            };
+        }
+    };
+
+    pub fn pack(self: Inst) Packed {
+        return .pack(self);
+    }
+
+    pub fn unpack(packed_inst: Packed) Inst {
+        return packed_inst.unpack();
+    }
+
+    pub const Tag = @Type(.{ .@"enum" = .{
+        .tag_type = u8,
+        .is_exhaustive = true,
+        .fields = fields: {
+            const u_fields = @typeInfo(Packed.Data).@"union".fields;
+            var e_fields: [u_fields.len]std.builtin.Type.EnumField = undefined;
+            for (&e_fields, u_fields, 0..) |*e_field, u_field, i| {
+                e_field.* = .{ .name = u_field.name, .value = i };
+            }
+            break :fields &e_fields;
+        },
+        .decls = &.{},
+    } });
+    pub const Packed = extern struct {
+        tag: Tag,
+        data: Data,
+
+        pub const List = std.MultiArrayList(Packed);
+
+        comptime {
+            if (@sizeOf(Data) != 8) @compileError(
+                std.fmt.comptimePrint("Wrong size '{d}'", .{@sizeOf(Data)}),
+            );
+        }
+        pub const Data = extern union {
+            int_pos: u64,
+            int_neg: i64,
+            int_big: IntBig,
+            float: Float128,
+
+            typed: Typed,
+
+            add: BinOp,
+            add_wrap: BinOp,
+            add_saturate: BinOp,
+
+            sub: BinOp,
+            sub_wrap: BinOp,
+            sub_saturate: BinOp,
+
+            mul: BinOp,
+            mul_wrap: BinOp,
+            mul_saturate: BinOp,
+        };
+
+        pub fn unpack(self: Packed) Inst {
+            return switch (self.tag) {
+                inline else => |tag| @unionInit(
+                    Inst,
+                    @tagName(tag),
+                    @field(self.data, @tagName(tag)),
+                ),
+            };
+        }
+
+        pub fn pack(inst: Inst) Packed {
+            return .{
+                .tag = inst,
+                .data = switch (inst) {
+                    inline else => |pl, tag| @unionInit(Data, @tagName(tag), pl),
+                },
             };
         }
     };
@@ -129,7 +187,7 @@ pub fn generate(
     tokens: Tokens,
     ast: Ast,
 ) std.mem.Allocator.Error!Ir {
-    var insts: Inst.List = .empty;
+    var insts: Inst.Packed.List = .empty;
     defer insts.deinit(gpa);
 
     var extra_data: std.ArrayList(u32) = .empty;
@@ -204,7 +262,7 @@ const Generator = struct {
     tokens: Tokens,
     ast: Ast,
 
-    insts: *Inst.List,
+    insts: *Inst.Packed.List,
     extra_data: *std.ArrayList(u32),
     big_int_limbs: *std.ArrayList(BigIntLimb),
 
@@ -254,10 +312,10 @@ const Generator = struct {
 
                     switch (op_kind) {
                         .colon => {
-                            gen.insts.set(soe.dst.toInt().?, .{ .typed = .{
+                            gen.insts.set(soe.dst.toInt().?, .pack(.{ .typed = .{
                                 .operand = lhs_inst,
                                 .type = rhs_inst,
-                            } });
+                            } }));
                         },
 
                         .ampersand => std.debug.panic("TODO", .{}),
@@ -279,10 +337,10 @@ const Generator = struct {
                         .mul_saturate,
                         => |ikind| {
                             const op_tag = @field(Inst.Tag, @tagName(ikind));
-                            gen.insts.set(soe.dst.toInt().?, @unionInit(Inst, @tagName(op_tag), .{
+                            gen.insts.set(soe.dst.toInt().?, .pack(@unionInit(Inst, @tagName(op_tag), .{
                                 .lhs = lhs_inst,
                                 .rhs = rhs_inst,
-                            }));
+                            })));
                         },
                     }
                 },
@@ -309,21 +367,21 @@ const Generator = struct {
                     const type_suffix = full_src[type_suffix_start..];
                     try gen.insts.ensureUnusedCapacity(gpa, 1);
                     const new_inst = gen.addInstAssumeCapacityUndef();
-                    gen.insts.set(dst_inst.toInt().?, .{ .typed = .{
+                    gen.insts.set(dst_inst.toInt().?, .pack(.{ .typed = .{
                         .operand = new_inst,
                         .type = if (true) std.debug.panic("TODO: inst for types using {s}", .{type_suffix}),
-                    } });
+                    } }));
                     break :blk new_inst;
                 } else dst_inst;
 
                 switch (std.zig.parseNumberLiteral(main_src)) {
                     .int => |raw| {
                         if (!is_neg) {
-                            gen.insts.set(int_inst.toInt().?, .{ .int_pos = raw });
+                            gen.insts.set(int_inst.toInt().?, .pack(.{ .int_pos = raw }));
                             return;
                         }
                         if (std.math.negateCast(raw)) |value| {
-                            gen.insts.set(int_inst.toInt().?, .{ .int_neg = value });
+                            gen.insts.set(int_inst.toInt().?, .pack(.{ .int_neg = value }));
                             return;
                         } else |err| switch (err) {
                             error.Overflow => {}, // fallthrough to int_big branch
@@ -354,11 +412,11 @@ const Generator = struct {
                             gen.big_int_limbs.shrinkRetainingCapacity(gen.big_int_limbs.items.len - limbs_tmp_buf_len);
                         }
 
-                        gen.insts.set(int_inst.toInt().?, .{ .int_big = .{
+                        gen.insts.set(int_inst.toInt().?, .pack(.{ .int_big = .{
                             .start = big_int_limbs_start,
                             .len = limb_count,
                             .positive = !is_neg,
-                        } });
+                        } }));
                     },
                     .float => |float_base| {
                         _ = float_base;
@@ -368,9 +426,9 @@ const Generator = struct {
                         const start = gen.extra_data.items.len;
                         const buffer = try gen.extra_data.addManyAsArray(gpa, @divExact(@sizeOf(u128), @sizeOf(u32)));
                         std.mem.writeInt(u128, @ptrCast(buffer), @bitCast(float_value), .little);
-                        gen.insts.set(int_inst.toInt().?, .{ .float = .{
+                        gen.insts.set(int_inst.toInt().?, .pack(.{ .float = .{
                             .start = start,
-                        } });
+                        } }));
                     },
                     .failure => std.debug.panic("TODO", .{}),
                 }
