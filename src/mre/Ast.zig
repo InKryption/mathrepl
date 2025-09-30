@@ -15,11 +15,11 @@ pub fn deinit(ast: Ast, gpa: std.mem.Allocator) void {
 }
 
 pub const Node = union(enum(u8)) {
-    null: struct { Tokens.Value.Index, Packed.Data },
     value_ref: ValueRef,
     grouped: Grouped,
     un_op: UnOp,
     bin_op: BinOp,
+    list: List,
     block: Block,
 
     pub const null_init: Node = .{ .null = .{ 0, .init(0, 0) } };
@@ -138,6 +138,37 @@ pub const Node = union(enum(u8)) {
         }
     };
 
+    pub const List = struct {
+        start: u32,
+        end: u32,
+        /// Either points to the trailing comma, or to the last token of the last element in the list.
+        end_tok: Tokens.Value.Index,
+
+        pub fn getNodesLen(list: List) u32 {
+            return list.end - list.start;
+        }
+
+        pub fn getNodes(
+            list: List,
+            /// The `extra_data` field of `Ast`.
+            extra_data: []const u32,
+        ) []const Node.Index {
+            return @ptrCast(extra_data[list.start..list.end]);
+        }
+
+        pub fn unpack(main_token: Tokens.Value.Index, data: Packed.Data) List {
+            return .{
+                .end_tok = main_token,
+                .start = data.lhs,
+                .end = data.rhs,
+            };
+        }
+
+        pub fn pack(list: List) struct { Tokens.Value.Index, Packed.Data } {
+            return .{ list.end_tok, .init(list.start, list.end) };
+        }
+    };
+
     pub const Block = struct {
         start: u32,
         end: u32,
@@ -187,14 +218,12 @@ pub const Node = union(enum(u8)) {
 
         pub fn unpack(self: Packed) Node {
             return switch (self.tag) {
-                .null => .{ .null = .{ self.main_token, self.data } },
                 inline else => |tag| @unionInit(Node, @tagName(tag), .unpack(self.main_token, self.data)),
             };
         }
 
         pub fn pack(node: Node) Packed {
             const main_token: Tokens.Value.Index, const data: Data = switch (node) {
-                .null => |unused| unused,
                 inline else => |pl| pl.pack(),
             };
             return .{
@@ -284,6 +313,7 @@ pub const NodeFmt = struct {
     ) std.Io.Writer.Error!void {
         const params = self.params;
         const options = params.options;
+        const four_spaces = " " ** 4;
 
         const Pending = packed struct(u64) {
             node: Node.Index,
@@ -325,10 +355,6 @@ pub const NodeFmt = struct {
             const pending: Pending = pending_stack.pop() orelse break;
             const pending_node = self.ast.nodes.get(pending.node.toIntAllowRoot());
             switch (pending_node.unpack()) {
-                .null => {
-                    std.debug.assert(pending.state.raw == .initial);
-                    try w.writeAll("<null>");
-                },
                 .value_ref => |value_ref| {
                     std.debug.assert(pending.state.raw == .initial);
                     const src = value_ref.getSrc(self.tokens);
@@ -369,65 +395,69 @@ pub const NodeFmt = struct {
                         .state = .{ .raw = .initial },
                     });
                 },
-                .bin_op => |bin_op| bin_op_sw: switch (pending.state.bin_op) {
-                    .start => {
-                        if (pending.need_prec_paren) {
-                            if (options.precedence_delims) |delims| {
-                                const start_delim, _ = delims;
-                                try w.writeAll(start_delim);
+                .bin_op => |bin_op| {
+                    const op_tok = self.tokens.list.get(bin_op.op);
+                    const op_str = op_tok.loc.getSrc(self.tokens.src.slice());
+                    const canon_spacing = oper_table.get(op_tok.kind.toOperator().?).canon_spacing;
+                    const before: []const u8, const after: []const u8 = switch (canon_spacing) {
+                        .surround => .{ " ", " " },
+                        .stick_to_left => .{ "", " " },
+                    };
+                    bin_op_sw: switch (pending.state.bin_op) {
+                        .start => {
+                            if (pending.need_prec_paren) {
+                                if (options.precedence_delims) |delims| {
+                                    const start_delim, _ = delims;
+                                    try w.writeAll(start_delim);
+                                }
                             }
-                        }
-                        pending_stack.appendSliceBounded(&.{
-                            .{
-                                .node = pending.node,
-                                .need_prec_paren = pending.need_prec_paren,
-                                .state = .{ .bin_op = .op },
-                            },
-                            .{
-                                .node = bin_op.lhs,
-                                .need_prec_paren = true,
-                                .state = .{ .raw = .initial },
-                            },
-                        }) catch {
-                            const op_tok = self.tokens.list.get(bin_op.op);
-                            const op_str = op_tok.loc.getSrc(self.tokens.src.slice());
-                            try writeVecAllCopy(w, .{ options.truncated_str, " ", op_str, " ", options.truncated_str });
-                            continue :bin_op_sw .close_precedence_delim;
-                        };
-                    },
-                    .op => {
-                        const op_tok = self.tokens.list.get(bin_op.op);
-                        const op_str = op_tok.loc.getSrc(self.tokens.src.slice());
-                        try writeVecAllCopy(w, .{ " ", op_str, " " });
-                        // if we got here, it means that the `appendSliceBounded` call in the `start` branch
-                        // was successful in appending 2 nodes, and that capacity shouldn't be any different
-                        // at this point.
-                        pending_stack.appendSliceAssumeCapacity(&.{
-                            .{
-                                .node = pending.node,
-                                .need_prec_paren = pending.need_prec_paren,
-                                .state = .{ .bin_op = .close_precedence_delim },
-                            },
-                            .{
-                                .node = bin_op.rhs,
-                                .need_prec_paren = true,
-                                .state = .{ .raw = .initial },
-                            },
-                        });
-                    },
-                    .close_precedence_delim => {
-                        if (pending.need_prec_paren) {
-                            if (options.precedence_delims) |delims| {
-                                _, const end_delim = delims;
-                                try w.writeAll(end_delim);
+                            pending_stack.appendSliceBounded(&.{
+                                .{
+                                    .node = pending.node,
+                                    .need_prec_paren = pending.need_prec_paren,
+                                    .state = .{ .bin_op = .op },
+                                },
+                                .{
+                                    .node = bin_op.lhs,
+                                    .need_prec_paren = true,
+                                    .state = .{ .raw = .initial },
+                                },
+                            }) catch {
+                                try writeVecAllCopy(w, .{ options.truncated_str, before, op_str, after, options.truncated_str });
+                                continue :bin_op_sw .close_precedence_delim;
+                            };
+                        },
+                        .op => {
+                            try writeVecAllCopy(w, .{ before, op_str, after });
+                            // if we got here, it means that the `appendSliceBounded` call in the `start` branch
+                            // was successful in appending 2 nodes, and that capacity shouldn't be any different
+                            // at this point.
+                            pending_stack.appendSliceAssumeCapacity(&.{
+                                .{
+                                    .node = pending.node,
+                                    .need_prec_paren = pending.need_prec_paren,
+                                    .state = .{ .bin_op = .close_precedence_delim },
+                                },
+                                .{
+                                    .node = bin_op.rhs,
+                                    .need_prec_paren = true,
+                                    .state = .{ .raw = .initial },
+                                },
+                            });
+                        },
+                        .close_precedence_delim => {
+                            if (pending.need_prec_paren) {
+                                if (options.precedence_delims) |delims| {
+                                    _, const end_delim = delims;
+                                    try w.writeAll(end_delim);
+                                }
                             }
-                        }
-                    },
-                    _ => unreachable,
+                        },
+                        _ => unreachable,
+                    }
                 },
+                .list => |list| std.debug.panic("TODO: {}", .{list}),
                 .block => |block| {
-                    const four_spaces = " " ** 4;
-
                     var state = pending.state.block;
                     const block_nodes = block.getNodes(self.ast.extra_data);
                     if (block_nodes.len == 0) {
@@ -502,7 +532,23 @@ fn writeVecAllCopy(
 
 const OperInfo = struct {
     prec: u32,
-    assoc: enum { none, left, right },
+    assoc: Assoc,
+    canon_spacing: CanonSpacing = .surround,
+
+    const Assoc = enum { none, left, right };
+    const CanonSpacing = enum { surround, stick_to_left };
+
+    fn init(
+        prec: u32,
+        assoc: Assoc,
+        canon_spacing: CanonSpacing,
+    ) OperInfo {
+        return .{
+            .prec = prec,
+            .assoc = assoc,
+            .canon_spacing = canon_spacing,
+        };
+    }
 
     fn choose(lhs: OperInfo, rhs: OperInfo) enum { invalid, lhs, rhs } {
         return switch (std.math.order(lhs.prec, rhs.prec)) {
@@ -519,23 +565,24 @@ const OperInfo = struct {
     }
 };
 
-const oper_table: std.EnumMap(Lexer.Token.Kind, OperInfo) = .init(.{
-    .ampersand = .{ .prec = 1, .assoc = .left },
-    .pipe = .{ .prec = 1, .assoc = .left },
-    .percent = .{ .prec = 2, .assoc = .left },
-    .slash = .{ .prec = 2, .assoc = .left },
+const oper_table: std.EnumArray(Lexer.Token.Kind.Operator, OperInfo) = .init(.{
+    .colon = .init(3, .left, .stick_to_left),
+    .ampersand = .init(1, .left, .surround),
+    .pipe = .init(1, .left, .surround),
+    .percent = .init(2, .left, .surround),
+    .slash = .init(2, .left, .surround),
 
-    .plus = .{ .prec = 1, .assoc = .left },
-    .plus_pipe = .{ .prec = 1, .assoc = .left },
-    .plus_percent = .{ .prec = 1, .assoc = .left },
+    .add = .init(1, .left, .surround),
+    .add_wrap = .init(1, .left, .surround),
+    .add_saturate = .init(1, .left, .surround),
 
-    .sub = .{ .prec = 1, .assoc = .left },
-    .sub_pipe = .{ .prec = 1, .assoc = .left },
-    .sub_percent = .{ .prec = 1, .assoc = .left },
+    .sub = .init(1, .left, .surround),
+    .sub_wrap = .init(1, .left, .surround),
+    .sub_saturate = .init(1, .left, .surround),
 
-    .mul = .{ .prec = 2, .assoc = .left },
-    .mul_pipe = .{ .prec = 2, .assoc = .left },
-    .mul_percent = .{ .prec = 2, .assoc = .left },
+    .mul = .init(2, .left, .surround),
+    .mul_wrap = .init(2, .left, .surround),
+    .mul_saturate = .init(2, .left, .surround),
 });
 
 pub fn parse(
@@ -643,8 +690,7 @@ const Parser = struct {
                 .paren_l,
                 .brace_l,
                 .sub,
-                .sub_pipe,
-                .sub_percent,
+                .sub_wrap,
                 => {
                     try parser.states.appendSlice(gpa, &[_]State{
                         .handle_semicolon_after_expr,
@@ -658,7 +704,7 @@ const Parser = struct {
                         parser.skipWhitespace();
                         continue :sw tokens_kind[parser.tokens_index];
                     },
-                    .sub, .sub_percent => {
+                    .sub, .sub_wrap => {
                         const op_tok = parser.tokens_index;
                         parser.tokens_index += 1;
 
@@ -717,17 +763,19 @@ const Parser = struct {
                     .percent,
                     .slash,
 
-                    .plus,
-                    .plus_pipe,
-                    .plus_percent,
+                    .add,
+                    .add_wrap,
+                    .add_saturate,
 
                     .sub,
-                    .sub_pipe,
-                    .sub_percent,
+                    .sub_wrap,
+                    .sub_saturate,
 
                     .mul,
-                    .mul_pipe,
-                    .mul_percent,
+                    .mul_wrap,
+                    .mul_saturate,
+
+                    .colon,
                     => {
                         const rhs_op_tok = parser.tokens_index;
                         parser.tokens_index += 1;
@@ -762,12 +810,11 @@ const Parser = struct {
 
                 const rhs_op_tok = data.rhs_op_tok;
                 const rhs_op_tag = tokens_kind[rhs_op_tok];
-                const rhs_op_info = oper_table.get(rhs_op_tag).?;
+                const rhs_op_info = oper_table.get(rhs_op_tag.toOperator().?);
 
                 const current_expr = parser.nodes.get(data.dst_node.toInt().?);
                 switch (current_expr.unpack()) {
-                    .null => std.debug.panic("TODO", .{}),
-                    .value_ref, .grouped, .block, .un_op => {
+                    .value_ref, .grouped, .un_op, .list, .block => {
                         const lhs_expr_node = try parser.addNode(gpa, current_expr);
                         parser.nodes.set(data.dst_node.toInt().?, .pack(.{ .bin_op = .{
                             .lhs = lhs_expr_node,
@@ -786,7 +833,7 @@ const Parser = struct {
                     const lhs_bin_op = parser.nodes.get(lhs_bin_op_index.toInt().?).unpack().bin_op;
                     const lhs_op_tok = lhs_bin_op.op;
                     const lhs_op_tag = tokens_kind[lhs_op_tok];
-                    const lhs_op_info = oper_table.get(lhs_op_tag).?;
+                    const lhs_op_info = oper_table.get(lhs_op_tag.toOperator().?);
                     const bind_which: BindWhich = switch (OperInfo.choose(lhs_op_info, rhs_op_info)) {
                         .invalid => std.debug.panic("TODO: Handle invalid associativity", .{}),
                         .lhs => .lhs,
@@ -795,8 +842,7 @@ const Parser = struct {
                     switch (bind_which) {
                         .lhs => break .lhs,
                         .rhs => switch (parser.nodes.items(.tag)[lhs_bin_op.rhs.toInt().?]) {
-                            .null => std.debug.panic("TODO", .{}),
-                            .value_ref, .grouped, .block, .un_op => break .rhs,
+                            .value_ref, .grouped, .un_op, .list, .block => break .rhs,
                             .bin_op => {
                                 lhs_bin_op_index = lhs_bin_op.rhs;
                                 continue;
@@ -819,9 +865,8 @@ const Parser = struct {
                     },
                     .rhs => {
                         switch (parser.nodes.items(.tag)[lhs_bin_op.rhs.toInt().?]) {
-                            .null => std.debug.panic("TODO", .{}),
                             .bin_op => unreachable,
-                            .value_ref, .grouped, .block, .un_op => {},
+                            .value_ref, .grouped, .un_op, .list, .block => {},
                         }
                         const rhs_outer_expr_node = try parser.addNode(gpa, .pack(.{ .bin_op = .{
                             .lhs = lhs_bin_op.rhs,
@@ -962,14 +1007,183 @@ const Parser = struct {
     }
 };
 
+const TestNode = union(Node.Tag) {
+    value_ref: struct { Node.ValueRef.Kind, []const u8 },
+    grouped: *const TestNode,
+    un_op: struct { Lexer.Token.Kind, *const TestNode },
+    bin_op: struct {
+        lhs: *const TestNode,
+        op: Lexer.Token.Kind,
+        rhs: *const TestNode,
+    },
+    list: []const TestNode,
+    block: []const TestNode,
+
+    fn initValueRef(kind: Node.ValueRef.Kind, str: []const u8) TestNode {
+        return .{ .value_ref = .{ kind, str } };
+    }
+
+    fn initUnOp(op: Lexer.Token.Kind, operand: *const TestNode) TestNode {
+        return .{ .un_op = .{ op, operand } };
+    }
+
+    fn initBinOp(
+        op: Lexer.Token.Kind,
+        params: struct {
+            lhs: *const TestNode,
+            rhs: *const TestNode,
+        },
+    ) TestNode {
+        return .{ .bin_op = .{
+            .lhs = params.lhs,
+            .op = op,
+            .rhs = params.rhs,
+        } };
+    }
+
+    fn initList(nodes: []const TestNode) TestNode {
+        return .{ .list = nodes };
+    }
+
+    fn initBlock(nodes: []const TestNode) TestNode {
+        return .{ .block = nodes };
+    }
+};
+
+fn expectEqualAstNode(
+    ast: Ast,
+    tokens: Tokens,
+    actual_base_node: Node.Index,
+    expected: TestNode,
+) !void {
+    const gpa = std.testing.allocator;
+
+    const State = union(enum) {
+        const State = @This();
+        any: struct {
+            expected: TestNode,
+            actual_node: Node.Index,
+        },
+        cmp_slices: struct {
+            expected: []const TestNode,
+            actual: []const Node.Index,
+            index: usize,
+        },
+    };
+    var states: std.ArrayList(State) = .empty;
+    defer states.deinit(gpa);
+    try states.append(gpa, .{ .any = .{
+        .expected = expected,
+        .actual_node = actual_base_node,
+    } });
+    while (states.pop()) |state| switch (state) {
+        .any => |any| {
+            const actual_packed = ast.nodes.get(any.actual_node.toIntAllowRoot());
+            try std.testing.expectEqual(@as(Node.Tag, any.expected), actual_packed.tag);
+            switch (any.expected) {
+                .value_ref => |expected_valref| {
+                    const expected_kind, const expected_str = expected_valref;
+                    const actual_valref = actual_packed.unpack().value_ref;
+                    try std.testing.expectEqualStrings(expected_str, actual_valref.getSrc(tokens));
+                    try std.testing.expectEqual(expected_kind, actual_valref.getKind(tokens));
+                },
+                .grouped => |expected_grouped| {
+                    const actual_grouped = actual_packed.unpack().grouped;
+                    states.appendAssumeCapacity(.{ .any = .{
+                        .expected = expected_grouped.*,
+                        .actual_node = actual_grouped.expr,
+                    } });
+                },
+                .un_op => |expected_un_op| {
+                    const expected_kind, const expected_operand = expected_un_op;
+                    const actual_un_op = actual_packed.unpack().un_op;
+                    try std.testing.expectEqual(expected_kind, tokens.list.get(actual_un_op.op).kind);
+                    states.appendAssumeCapacity(.{ .any = .{
+                        .expected = expected_operand.*,
+                        .actual_node = actual_un_op.operand,
+                    } });
+                },
+                .bin_op => |expected_bin_op| {
+                    const actual_bin_op = actual_packed.unpack().bin_op;
+                    try std.testing.expectEqual(expected_bin_op.op, tokens.list.get(actual_bin_op.op).kind);
+                    try states.appendSlice(gpa, &.{
+                        .{ .any = .{
+                            .expected = expected_bin_op.rhs.*,
+                            .actual_node = actual_bin_op.rhs,
+                        } },
+                        .{ .any = .{
+                            .expected = expected_bin_op.lhs.*,
+                            .actual_node = actual_bin_op.lhs,
+                        } },
+                    });
+                },
+                .list => |expected_list| {
+                    const actual_list = actual_packed.unpack().list;
+                    states.appendAssumeCapacity(.{ .cmp_slices = .{
+                        .expected = expected_list,
+                        .actual = actual_list.getNodes(ast.extra_data),
+                        .index = 0,
+                    } });
+                },
+                .block => |expected_block| {
+                    const actual_block = actual_packed.unpack().block;
+                    states.appendAssumeCapacity(.{ .cmp_slices = .{
+                        .expected = expected_block,
+                        .actual = actual_block.getNodes(ast.extra_data),
+                        .index = 0,
+                    } });
+                },
+            }
+        },
+        .cmp_slices => |slices| cmp_slices: {
+            const amt = @min(slices.actual.len, slices.expected.len);
+            if (slices.index == amt) {
+                try std.testing.expectEqual(slices.expected.len, slices.actual.len);
+                break :cmp_slices;
+            }
+            const expected_item = slices.expected[slices.index];
+            const actual_item = slices.actual[slices.index];
+
+            try states.appendSlice(gpa, &.{
+                .{ .cmp_slices = updated: {
+                    var updated = slices;
+                    updated.index += 1;
+                    break :updated updated;
+                } },
+                .{ .any = .{
+                    .expected = expected_item,
+                    .actual_node = actual_item,
+                } },
+            });
+        },
+    };
+}
+
 test Ast {
     const gpa = std.testing.allocator;
 
     const tokens: Tokens = try .tokenizeSlice(gpa,
-        \\32u8 + 1
+        \\{
+        \\    (32u8 + 1) * 3:u8;
+        \\}
     );
     defer tokens.deinit(gpa);
 
     const ast: Ast = try .parse(gpa, tokens);
     defer ast.deinit(gpa);
+
+    try expectEqualAstNode(ast, tokens, .root, .initBlock(&.{
+        .initBlock(&.{
+            .initBinOp(.mul, .{
+                .lhs = &.{ .grouped = &.initBinOp(.add, .{
+                    .lhs = &.initValueRef(.number, "32u8"),
+                    .rhs = &.initValueRef(.number, "1"),
+                }) },
+                .rhs = &.initBinOp(.colon, .{
+                    .lhs = &.initValueRef(.number, "3"),
+                    .rhs = &.initValueRef(.ident, "u8"),
+                }),
+            }),
+        }),
+    }));
 }

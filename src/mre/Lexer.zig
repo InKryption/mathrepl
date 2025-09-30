@@ -28,34 +28,38 @@ pub const Token = union(Kind) {
     number: usize,
 
     let,
+    @"return",
     underscore,
     equal,
-    colon,
     semicolon,
     comma,
 
     paren_l,
     paren_r,
 
+    bracket_l,
+    bracket_r,
+
     brace_l,
     brace_r,
 
+    colon,
     ampersand,
     pipe,
     percent,
     slash,
 
-    plus,
-    plus_pipe,
-    plus_percent,
+    add,
+    add_wrap,
+    add_saturate,
 
     sub,
-    sub_pipe,
-    sub_percent,
+    sub_wrap,
+    sub_saturate,
 
     mul,
-    mul_pipe,
-    mul_percent,
+    mul_wrap,
+    mul_saturate,
 
     pub const Kind = enum(u8) {
         /// Simple empty token placed at the end.
@@ -76,12 +80,12 @@ pub const Token = union(Kind) {
 
         /// Consists of `'let'`.
         let,
+        /// Consists of `'return'`.
+        @"return",
         /// Consists of `'_'`.
         underscore,
         /// Consists of `'='`.
         equal,
-        /// Consists of `':'`.
-        colon,
         /// Consists of `';'`.
         semicolon,
         /// Consists of `','`.
@@ -92,11 +96,18 @@ pub const Token = union(Kind) {
         /// Consists of `')'`.
         paren_r,
 
+        /// Consists of `'['`.
+        bracket_l,
+        /// Consists of `']'`.
+        bracket_r,
+
         /// Consists of `'{'`.
         brace_l,
         /// Consists of `'}'`.
         brace_r,
 
+        /// Consists of `':'`.
+        colon,
         /// Consists of `'&'`.
         ampersand,
         /// Consists of `'|'`.
@@ -107,25 +118,25 @@ pub const Token = union(Kind) {
         slash,
 
         /// Consists of `'+'`.
-        plus,
-        /// Consists of `'+|'`.
-        plus_pipe,
+        add,
         /// Consists of `'+%'`.
-        plus_percent,
+        add_wrap,
+        /// Consists of `'+|'`.
+        add_saturate,
 
         /// Consists of `'-'`.
         sub,
-        /// Consists of `'-|'`.
-        sub_pipe,
         /// Consists of `'-%'`.
-        sub_percent,
+        sub_wrap,
+        /// Consists of `'-|'`.
+        sub_saturate,
 
         /// Consists of `'*'`.
         mul,
-        /// Consists of `'*|'`.
-        mul_pipe,
         /// Consists of `'*%'`.
-        mul_percent,
+        mul_wrap,
+        /// Consists of `'*|'`.
+        mul_saturate,
 
         pub const StaticSrc = union(enum) {
             null,
@@ -156,6 +167,7 @@ pub const Token = union(Kind) {
                 .number => .null,
 
                 .let => .{ .str = "let" },
+                .@"return" => .{ .str = "return" },
                 .underscore => .{ .char = '_' },
                 .equal => .{ .char = '=' },
                 .colon => .{ .char = ':' },
@@ -164,6 +176,10 @@ pub const Token = union(Kind) {
 
                 .paren_l => .{ .char = '(' },
                 .paren_r => .{ .char = ')' },
+
+                .bracket_l => .{ .char = '[' },
+                .bracket_r => .{ .char = ']' },
+
                 .brace_l => .{ .char = '{' },
                 .brace_r => .{ .char = '}' },
 
@@ -172,19 +188,53 @@ pub const Token = union(Kind) {
                 .percent => .{ .char = '%' },
                 .slash => .{ .char = '/' },
 
-                .plus => .{ .char = '+' },
-                .plus_pipe => .{ .str = "+|" },
-                .plus_percent => .{ .str = "+%" },
+                .add => .{ .char = '+' },
+                .add_saturate => .{ .str = "+|" },
+                .add_wrap => .{ .str = "+%" },
 
                 .sub => .{ .char = '-' },
-                .sub_pipe => .{ .str = "-|" },
-                .sub_percent => .{ .str = "-%" },
+                .sub_saturate => .{ .str = "-|" },
+                .sub_wrap => .{ .str = "-%" },
 
                 .mul => .{ .char = '*' },
-                .mul_pipe => .{ .str = "*|" },
-                .mul_percent => .{ .str = "*%" },
+                .mul_saturate => .{ .str = "*|" },
+                .mul_wrap => .{ .str = "*%" },
             };
         }
+
+        pub fn toOperator(kind: Kind) ?Operator {
+            const NonExhaustive = @Type(.{ .@"enum" = .{
+                .is_exhaustive = false,
+                .tag_type = @typeInfo(Operator).@"enum".tag_type,
+                .fields = @typeInfo(Operator).@"enum".fields,
+                .decls = &.{},
+            } });
+            const non_exhaustive: NonExhaustive = @enumFromInt(@intFromEnum(kind));
+            return switch (non_exhaustive) {
+                _ => null,
+                else => |value| @enumFromInt(@intFromEnum(value)),
+            };
+        }
+
+        pub const Operator = enum(u8) {
+            colon = @intFromEnum(Kind.colon),
+            ampersand = @intFromEnum(Kind.ampersand),
+            pipe = @intFromEnum(Kind.pipe),
+            percent = @intFromEnum(Kind.percent),
+            slash = @intFromEnum(Kind.slash),
+
+            add = @intFromEnum(Kind.add),
+            add_wrap = @intFromEnum(Kind.add_wrap),
+            add_saturate = @intFromEnum(Kind.add_saturate),
+
+            sub = @intFromEnum(Kind.sub),
+            sub_wrap = @intFromEnum(Kind.sub_wrap),
+            sub_saturate = @intFromEnum(Kind.sub_saturate),
+
+            mul = @intFromEnum(Kind.mul),
+            mul_wrap = @intFromEnum(Kind.mul_wrap),
+            mul_saturate = @intFromEnum(Kind.mul_saturate),
+        };
     };
 
     pub fn getKind(token: Token) Kind {
@@ -314,7 +364,7 @@ pub fn peekToken(
                     break :sw .{ .whitespace, .start };
                 },
 
-                inline '=', ':', ';', ',', '&', '|', '%', '/', '(', ')', '{', '}' => |char| {
+                inline '=', ':', ';', ',', '&', '|', '%', '/', '(', ')', '[', ']', '{', '}' => |char| {
                     const kind: Token.Kind = comptime switch (char) {
                         '=' => .equal,
                         ':' => .colon,
@@ -326,6 +376,8 @@ pub fn peekToken(
                         '/' => .slash,
                         '(' => .paren_l,
                         ')' => .paren_r,
+                        '[' => .bracket_l,
+                        ']' => .bracket_r,
                         '{' => .brace_l,
                         '}' => .brace_r,
                         else => @compileError("Unhandled: '" ++ .{char} ++ "'"),
@@ -334,18 +386,29 @@ pub fn peekToken(
                 },
 
                 inline '+', '-', '*' => |char| {
-                    const simple, const percent, const pipe = comptime switch (char) {
-                        '+' => .{ .plus, .plus_percent, .plus_pipe },
-                        '-' => .{ .sub, .sub_percent, .sub_pipe },
-                        '*' => .{ .mul, .mul_percent, .mul_pipe },
+                    const simple: Token.Kind, //
+                    const wrap: Token.Kind, //
+                    const saturate: Token.Kind //
+                    = comptime switch (char) {
+                        '+' => .{ .add, .add_wrap, .add_saturate },
+                        '-' => .{ .sub, .sub_wrap, .sub_saturate },
+                        '*' => .{ .mul, .mul_wrap, .mul_saturate },
                         else => @compileError("Unhandled: '" ++ .{char} ++ "'"),
                     };
 
                     const eof = try fillCheckEof(src, 2);
                     if (eof) break :sw .{ simple, .start };
                     const kind: Token.Kind = switch (src.buffered()[1]) {
-                        '%' => percent,
-                        '|' => pipe,
+                        '%' => wrap,
+                        '|' => saturate,
+                        '0'...'9' => switch (char) {
+                            '-' => {
+                                buffered_end += 1;
+                                continue :sw .number;
+                            },
+                            '+', '*' => break :sw .{ simple, .start },
+                            else => @compileError("Unhandled: '" ++ .{char} ++ "'"),
+                        },
                         else => break :sw .{ simple, .start },
                     };
                     break :sw .{ kind, .start };
@@ -390,12 +453,14 @@ pub fn peekToken(
 
             const Kw = enum {
                 let,
+                @"return",
                 @"_",
             };
             if (std.meta.stringToEnum(Kw, src.buffered()[0..buffered_end])) |kw| {
                 std.debug.assert(token_is_done);
                 const kind: Token.Kind = switch (kw) {
                     .let => .let,
+                    .@"return" => .@"return",
                     ._ => .underscore,
                 };
                 break :sw .{ kind, .start };
@@ -609,31 +674,37 @@ test Lexer {
     try expectTokenization("", &.{});
     try expectTokenization(" \n", &.{.init(.whitespace, " \n")});
     try expectTokenization("let", &.{.static(.let)});
+    try expectTokenization("return", &.{.static(.@"return")});
     try expectTokenization("foo", &.{.init(.ident, "foo")});
     try expectTokenization("10_024.0", &.{.init(.number, "10_024.0")});
+    try expectTokenization("-10_024.0u5", &.{.init(.number, "-10_024.0u5")});
     try expectTokenization("_", &.{.static(.underscore)});
     try expectTokenization(":", &.{.static(.colon)});
     try expectTokenization("=", &.{.static(.equal)});
     try expectTokenization(";", &.{.static(.semicolon)});
     try expectTokenization("(", &.{.static(.paren_l)});
     try expectTokenization(")", &.{.static(.paren_r)});
+    try expectTokenization("[", &.{.static(.bracket_l)});
+    try expectTokenization("]", &.{.static(.bracket_r)});
+    try expectTokenization("{", &.{.static(.brace_l)});
+    try expectTokenization("}", &.{.static(.brace_r)});
 
     try expectTokenization("&", &.{.static(.ampersand)});
     try expectTokenization("|", &.{.static(.pipe)});
     try expectTokenization("%", &.{.static(.percent)});
 
-    try expectTokenization("+", &.{.static(.plus)});
-    try expectTokenization("+%", &.{.static(.plus_percent)});
-    try expectTokenization("+|", &.{.static(.plus_pipe)});
+    try expectTokenization("+", &.{.static(.add)});
+    try expectTokenization("+%", &.{.static(.add_wrap)});
+    try expectTokenization("+|", &.{.static(.add_saturate)});
 
     try expectTokenization("-", &.{.static(.sub)});
-    try expectTokenization("-%", &.{.static(.sub_percent)});
-    try expectTokenization("-|", &.{.static(.sub_pipe)});
+    try expectTokenization("-%", &.{.static(.sub_wrap)});
+    try expectTokenization("-|", &.{.static(.sub_saturate)});
 
     try expectTokenization("3u8 +% 255u8", &.{
         .number("3u8"),
         .space,
-        .static(.plus_percent),
+        .static(.add_wrap),
         .space,
         .number("255u8"),
     });
