@@ -31,6 +31,17 @@ pub const Value = extern struct {
         start: ByteOffset,
         end: ByteOffset,
 
+        pub fn initAbs(start: ByteOffset, end: ByteOffset) Loc {
+            return .{
+                .start = start,
+                .end = end,
+            };
+        }
+
+        pub fn initRel(start: ByteOffset, len: ByteOffset) Loc {
+            return .initAbs(start, start + len);
+        }
+
         pub fn getSrc(loc: Loc, src: []const u8) []const u8 {
             return src[loc.start..loc.end];
         }
@@ -189,14 +200,30 @@ fn nextToken(
                 try src_buffer.appendSlice(gpa, src.buffered()[0..src_len]);
             },
         }
+        len += @intCast(tok.getLen());
         src.toss(tok.getLen());
     };
 
     return .{
         .kind = first.getKind(),
-        .loc = .{
-            .start = start,
-            .end = start + len,
-        },
+        .loc = .initRel(start, len),
     };
+}
+
+test Tokens {
+    const gpa = std.testing.allocator;
+
+    const tokens: Tokens = try .tokenizeSlice(gpa, "1 + -1");
+    defer tokens.deinit(gpa);
+
+    try std.testing.expectEqualSlices(
+        Lexer.Token.Kind,
+        &.{ .number, .whitespace, .add, .whitespace, .number, .eof },
+        tokens.list.items(.kind),
+    );
+    try std.testing.expectEqualSlices(
+        Value.Loc,
+        &.{ .initRel(0, 1), .initRel(1, 1), .initRel(2, 1), .initRel(3, 1), .initRel(4, 2), .initRel(6, 0) },
+        tokens.list.items(.loc),
+    );
 }
