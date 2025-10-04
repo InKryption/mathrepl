@@ -19,13 +19,60 @@ pub fn deinit(self: Tokens, gpa: std.mem.Allocator) void {
     list.deinit(gpa);
 }
 
+pub fn get(self: Tokens, index: Value.Index) ?Value {
+    const i = index.toInt() orelse return null;
+    return self.list.get(i);
+}
+
+/// Assumes `index != .null`.
+pub fn getNonNull(self: Tokens, index: Value.Index) Value {
+    return self.list.get(index.toInt().?);
+}
+
+/// Assumes `index != .null`.
+pub fn getKind(self: Tokens, index: Value.Index) Lexer.Token.Kind {
+    return self.tokenKinds()[index.toInt().?];
+}
+
+pub fn tokenKinds(self: Tokens) []const Lexer.Token.Kind {
+    return self.list.items(.kind);
+}
+
+pub fn tokenLocs(self: Tokens) []const Value.Loc {
+    return self.list.items(.loc);
+}
+
 pub const Value = extern struct {
     kind: Lexer.Token.Kind,
     loc: Loc,
 
-    pub const Index = u32;
     pub const List = std.MultiArrayList(Value);
     pub const ByteOffset = u32;
+
+    pub const Index = enum(Int) {
+        pub const Int = u32;
+        null = std.math.maxInt(Int),
+        _,
+
+        /// `maxInt(Int)` is interpreted as `.null`.
+        pub fn fromInt(int: Int) Index {
+            return @enumFromInt(int);
+        }
+
+        pub fn toInt(self: Index) ?Int {
+            return switch (self) {
+                .null => null,
+                _ => |value| @intFromEnum(value),
+            };
+        }
+
+        pub fn plus(self: Index, offset: Int) Index {
+            const initial = self.toInt() orelse return .null;
+            const result, const ovf = @addWithOverflow(initial, offset);
+            if (ovf != 0) return .null;
+            return .fromInt(result);
+        }
+    };
 
     pub const Loc = extern struct {
         start: ByteOffset,
@@ -109,7 +156,7 @@ pub fn reuseTokenizeSlice(
     gpa: std.mem.Allocator,
     src: []const u8,
 ) std.mem.Allocator.Error!void {
-    std.debug.assert(src.len <= std.math.maxInt(Value.Index));
+    std.debug.assert(src.len <= std.math.maxInt(Value.Index.Int));
     var fixed: std.Io.Reader = .fixed(src);
     self.reuseTokenizeImpl(gpa, &fixed, .full) catch |err| switch (err) {
         error.OutOfMemory => |e| return e,
@@ -135,7 +182,10 @@ fn reuseTokenizeImpl(
     mode: Lexer.Mode,
 ) (std.mem.Allocator.Error || Lexer.ReaderError)!void {
     var limited_buffer: [Lexer.min_stream_buffer_size]u8 = undefined;
-    var limited_src = unlimited_src.limited(.limited(std.math.maxInt(Value.Index)), &limited_buffer);
+    var limited_src = unlimited_src.limited(
+        .limited(std.math.maxInt(Value.Index.Int)),
+        &limited_buffer,
+    );
     const src: *std.Io.Reader = switch (mode) {
         .full => unlimited_src,
         .stream => &limited_src.interface,
@@ -161,7 +211,7 @@ fn reuseTokenizeImpl(
     var lexer: Lexer = .init;
     while (true) {
         const tok = try nextToken(gpa, src, mode, &lexer, src_buffer);
-        if (list.len == std.math.maxInt(Value.Index)) unreachable;
+        if (list.len == std.math.maxInt(Value.Index.Int)) unreachable;
         try list.append(gpa, tok);
         if (tok.kind == .eof) break;
     }
@@ -219,11 +269,11 @@ test Tokens {
     try std.testing.expectEqualSlices(
         Lexer.Token.Kind,
         &.{ .number, .whitespace, .add, .whitespace, .number, .eof },
-        tokens.list.items(.kind),
+        tokens.tokenKinds(),
     );
     try std.testing.expectEqualSlices(
         Value.Loc,
         &.{ .initRel(0, 1), .initRel(1, 1), .initRel(2, 1), .initRel(3, 1), .initRel(4, 2), .initRel(6, 0) },
-        tokens.list.items(.loc),
+        tokens.tokenLocs(),
     );
 }

@@ -69,7 +69,7 @@ pub const Node = union(enum(u8)) {
         }
 
         pub fn getRawToken(ref: ValueRef, tokens: Tokens) Tokens.Value {
-            return tokens.list.get(ref.main_token);
+            return tokens.getNonNull(ref.main_token);
         }
 
         pub fn unpack(main_token: Tokens.Value.Index, data: Packed.Data) ValueRef {
@@ -129,12 +129,12 @@ pub const Node = union(enum(u8)) {
             return .{
                 .expr = .fromInt(data.lhs),
                 .paren_l = main_token,
-                .paren_r = data.rhs,
+                .paren_r = .fromInt(data.rhs),
             };
         }
 
         pub fn pack(grouped: Grouped) struct { Tokens.Value.Index, Packed.Data } {
-            return .{ grouped.paren_l, .init(grouped.expr.toInt().?, grouped.paren_r) };
+            return .{ grouped.paren_l, .init(grouped.expr.toInt().?, grouped.paren_r.toInt().?) };
         }
     };
 
@@ -239,7 +239,7 @@ pub const Node = union(enum(u8)) {
             for (e_fields) |e_field| {
                 const packed_value: Node.Packed = .{
                     .tag = @enumFromInt(e_field.value),
-                    .main_token = 1,
+                    .main_token = .fromInt(1),
                     .data = .init(2, 3),
                 };
                 const unpacked_value: Node = packed_value.unpack();
@@ -386,7 +386,7 @@ pub const NodeFmt = struct {
                 },
                 .un_op => |un| {
                     std.debug.assert(pending.state.raw == .initial);
-                    const op_tok = self.tokens.list.get(un.op);
+                    const op_tok = self.tokens.getNonNull(un.op);
                     const op_str = op_tok.loc.getSrc(self.tokens.src.slice());
                     try w.writeAll(op_str);
                     pending_stack.appendAssumeCapacity(.{
@@ -396,7 +396,7 @@ pub const NodeFmt = struct {
                     });
                 },
                 .bin_op => |bin_op| {
-                    const op_tok = self.tokens.list.get(bin_op.op);
+                    const op_tok = self.tokens.getNonNull(bin_op.op);
                     const op_str = op_tok.loc.getSrc(self.tokens.src.slice());
                     const canon_spacing = oper_table.get(op_tok.kind.toOperator().?).canon_spacing;
                     const before: []const u8, const after: []const u8 = switch (canon_spacing) {
@@ -625,7 +625,7 @@ pub fn parse(
 
 const Parser = struct {
     tokens: *const Tokens,
-    tokens_index: Tokens.Value.Index,
+    tokens_index: Tokens.Value.Index.Int,
     nodes: *Node.Packed.List,
     extra_data: *std.ArrayList(u32),
     scratch: *std.ArrayList(u32),
@@ -634,7 +634,7 @@ const Parser = struct {
     const ParseError = error{ParseFail};
 
     fn parse(parser: *Parser, gpa: std.mem.Allocator) !void {
-        const tokens_kind: []const Lexer.Token.Kind = parser.tokens.list.items(.kind);
+        const token_kinds = parser.tokens.tokenKinds();
 
         const root_node = try parser.addNode(gpa, undefined);
         std.debug.assert(root_node == Node.Index.root);
@@ -650,8 +650,8 @@ const Parser = struct {
                 std.debug.assert(parser.scratch.items.len >= scratch_start);
                 defer std.debug.assert(parser.scratch.items.len >= scratch_start);
 
-                const closing_brace: Tokens.Value.Index = switch (tokens_kind[parser.tokens_index]) {
-                    .eof, .brace_r => parser.tokens_index,
+                const closing_brace: Tokens.Value.Index = switch (token_kinds[parser.tokens_index]) {
+                    .eof, .brace_r => .fromInt(parser.tokens_index),
                     else => {
                         const block_item_node = try parser.addNode(gpa, undefined);
                         try parser.scratch.append(gpa, block_item_node.toInt().?);
@@ -678,11 +678,11 @@ const Parser = struct {
                     .closing_brace = closing_brace,
                 } }));
             },
-            .expect_closing_brace => switch (tokens_kind[parser.tokens_index]) {
+            .expect_closing_brace => switch (token_kinds[parser.tokens_index]) {
                 .brace_r => parser.tokens_index += 1,
                 else => std.debug.panic("TODO: handle missing closing brace", .{}),
             },
-            .expect_statement_or_expr => |data| switch (tokens_kind[parser.tokens_index]) {
+            .expect_statement_or_expr => |data| switch (token_kinds[parser.tokens_index]) {
                 else => |t| std.debug.panic("TODO: {t}", .{t}),
                 .whitespace => unreachable,
                 .ident,
@@ -698,17 +698,17 @@ const Parser = struct {
                 },
             },
             .expect_expr_primary => |data| {
-                sw: switch (tokens_kind[parser.tokens_index]) {
+                sw: switch (token_kinds[parser.tokens_index]) {
                     else => unreachable,
                     .whitespace => {
                         parser.skipWhitespace();
-                        continue :sw tokens_kind[parser.tokens_index];
+                        continue :sw token_kinds[parser.tokens_index];
                     },
                     .sub, .sub_wrap => {
-                        const op_tok = parser.tokens_index;
+                        const op_tok: Tokens.Value.Index = .fromInt(parser.tokens_index);
                         parser.tokens_index += 1;
 
-                        if (tokens_kind[parser.tokens_index] == .whitespace) {
+                        if (token_kinds[parser.tokens_index] == .whitespace) {
                             std.debug.panic("TODO: whitespace in between unary operator and operand.", .{});
                         }
 
@@ -751,7 +751,7 @@ const Parser = struct {
             },
             .handle_expr_secondary => |data| {
                 parser.skipWhitespace();
-                switch (tokens_kind[parser.tokens_index]) {
+                switch (token_kinds[parser.tokens_index]) {
                     else => |tag| std.debug.panic("TODO: {t}", .{tag}),
                     .whitespace => unreachable,
                     .eof, .semicolon, .paren_r, .brace_r => {
@@ -777,7 +777,7 @@ const Parser = struct {
 
                     .colon,
                     => {
-                        const rhs_op_tok = parser.tokens_index;
+                        const rhs_op_tok: Tokens.Value.Index = .fromInt(parser.tokens_index);
                         parser.tokens_index += 1;
                         parser.skipWhitespace();
                         const rhs_expr_node = try parser.addNode(gpa, undefined);
@@ -809,7 +809,7 @@ const Parser = struct {
                 });
 
                 const rhs_op_tok = data.rhs_op_tok;
-                const rhs_op_tag = tokens_kind[rhs_op_tok];
+                const rhs_op_tag = token_kinds[rhs_op_tok.toInt().?];
                 const rhs_op_info = oper_table.get(rhs_op_tag.toOperator().?);
 
                 const current_expr = parser.nodes.get(data.dst_node.toInt().?);
@@ -832,7 +832,7 @@ const Parser = struct {
                 const bind_which: BindWhich = while (true) {
                     const lhs_bin_op = parser.nodes.get(lhs_bin_op_index.toInt().?).unpack().bin_op;
                     const lhs_op_tok = lhs_bin_op.op;
-                    const lhs_op_tag = tokens_kind[lhs_op_tok];
+                    const lhs_op_tag = token_kinds[lhs_op_tok.toInt().?];
                     const lhs_op_info = oper_table.get(lhs_op_tag.toOperator().?);
                     const bind_which: BindWhich = switch (OperInfo.choose(lhs_op_info, rhs_op_info)) {
                         .invalid => std.debug.panic("TODO: Handle invalid associativity", .{}),
@@ -878,9 +878,9 @@ const Parser = struct {
                 }
             },
             .expect_grouped_start => |data| {
-                std.debug.assert(tokens_kind[parser.tokens_index] == .paren_l);
+                std.debug.assert(token_kinds[parser.tokens_index] == .paren_l);
 
-                const paren_l = parser.tokens_index;
+                const paren_l: Tokens.Value.Index = .fromInt(parser.tokens_index);
                 parser.tokens_index += 1;
                 parser.skipWhitespace();
 
@@ -895,11 +895,11 @@ const Parser = struct {
                     },
                 } ++ State.expectFullExpr(inner_expr_node));
             },
-            .expect_grouped_end => |data| switch (tokens_kind[parser.tokens_index]) {
+            .expect_grouped_end => |data| switch (token_kinds[parser.tokens_index]) {
                 else => unreachable,
                 .eof, .brace_r, .semicolon => std.debug.panic("TODO: handle unclosed paren", .{}),
                 .paren_r => {
-                    const paren_r = parser.tokens_index;
+                    const paren_r: Tokens.Value.Index = .fromInt(parser.tokens_index);
                     parser.tokens_index += 1;
                     parser.nodes.set(data.dst_node.toInt().?, .pack(.{ .grouped = .{
                         .expr = data.inner_expr,
@@ -909,14 +909,14 @@ const Parser = struct {
                 },
             },
             .handle_semicolon_after_expr => {
-                if (tokens_kind[parser.tokens_index] == .semicolon) {
+                if (token_kinds[parser.tokens_index] == .semicolon) {
                     parser.tokens_index += 1;
                 }
             },
         };
 
         const block = parser.nodes.get(root_node.toIntAllowRoot()).unpack().block;
-        if (parser.tokens.list.get(block.closing_brace).kind != .eof) {
+        if (parser.tokens.getKind(block.closing_brace) != .eof) {
             std.debug.panic("TODO: handle trailing rbrace", .{});
         }
     }
@@ -1002,7 +1002,7 @@ const Parser = struct {
         }
         defer self.tokens_index += 1;
         return .{
-            .main_token = self.tokens_index,
+            .main_token = .fromInt(self.tokens_index),
         };
     }
 };
@@ -1097,7 +1097,7 @@ fn expectEqualAstNode(
                 .un_op => |expected_un_op| {
                     const expected_kind, const expected_operand = expected_un_op;
                     const actual_un_op = actual_packed.unpack().un_op;
-                    try std.testing.expectEqual(expected_kind, tokens.list.get(actual_un_op.op).kind);
+                    try std.testing.expectEqual(expected_kind, tokens.getNonNull(actual_un_op.op).kind);
                     states.appendAssumeCapacity(.{ .any = .{
                         .expected = expected_operand.*,
                         .actual_node = actual_un_op.operand,
@@ -1105,7 +1105,7 @@ fn expectEqualAstNode(
                 },
                 .bin_op => |expected_bin_op| {
                     const actual_bin_op = actual_packed.unpack().bin_op;
-                    try std.testing.expectEqual(expected_bin_op.op, tokens.list.get(actual_bin_op.op).kind);
+                    try std.testing.expectEqual(expected_bin_op.op, tokens.getKind(actual_bin_op.op));
                     try states.appendSlice(gpa, &.{
                         .{ .any = .{
                             .expected = expected_bin_op.rhs.*,

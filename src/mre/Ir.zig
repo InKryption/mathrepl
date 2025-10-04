@@ -305,7 +305,7 @@ const Generator = struct {
                 else => std.debug.panic("TODO", .{}),
                 .value_ref => |value_ref| try gen.handleExprValueRef(gpa, soe.dst, value_ref),
                 .bin_op => |bin_op| {
-                    const op_tok = gen.tokens.list.get(bin_op.op);
+                    const op_tok = gen.tokens.getNonNull(bin_op.op);
                     const op_kind = op_tok.kind.toOperator() orelse std.debug.panic("TODO", .{});
                     try gen.insts.ensureUnusedCapacity(gpa, 2);
                     const lhs_inst = gen.addInstAssumeCapacityUndef();
