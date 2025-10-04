@@ -43,6 +43,8 @@ pub const Inst = union(Tag) {
     mul_wrap: BinOp,
     mul_saturate: BinOp,
 
+    div: BinOp,
+
     pub const Index = enum(Int) {
         pub const Int = u32;
         null = std.math.maxInt(Int),
@@ -82,6 +84,7 @@ pub const Inst = union(Tag) {
         },
         .decls = &.{},
     } });
+
     pub const Packed = extern struct {
         tag: Tag,
         data: Data,
@@ -112,6 +115,8 @@ pub const Inst = union(Tag) {
             mul: BinOp,
             mul_wrap: BinOp,
             mul_saturate: BinOp,
+
+            div: BinOp,
         };
 
         pub fn unpack(self: Packed) Inst {
@@ -320,10 +325,11 @@ const Generator = struct {
 
                         .ampersand => std.debug.panic("TODO", .{}),
                         .pipe => std.debug.panic("TODO", .{}),
-                        .percent => std.debug.panic("TODO", .{}),
-                        .slash => std.debug.panic("TODO", .{}),
+                        .modulo => std.debug.panic("TODO", .{}),
 
                         inline //
+                        .div,
+
                         .add,
                         .add_wrap,
                         .add_saturate,
@@ -442,7 +448,7 @@ test Ir {
 
     const tokens: Tokens = try .tokenizeSlice(gpa,
         \\{
-        \\    (32u8 + 1) * 3:u8;
+        \\    (32 + 1) * -3;
         \\}
     );
     defer tokens.deinit(gpa);

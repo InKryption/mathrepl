@@ -569,8 +569,8 @@ const oper_table: std.EnumArray(Lexer.Token.Kind.Operator, OperInfo) = .init(.{
     .colon = .init(3, .left, .stick_to_left),
     .ampersand = .init(1, .left, .surround),
     .pipe = .init(1, .left, .surround),
-    .percent = .init(2, .left, .surround),
-    .slash = .init(2, .left, .surround),
+    .modulo = .init(2, .left, .surround),
+    .div = .init(2, .left, .surround),
 
     .add = .init(1, .left, .surround),
     .add_wrap = .init(1, .left, .surround),
@@ -760,8 +760,8 @@ const Parser = struct {
 
                     .ampersand,
                     .pipe,
-                    .percent,
-                    .slash,
+                    .modulo,
+                    .div,
 
                     .add,
                     .add_wrap,

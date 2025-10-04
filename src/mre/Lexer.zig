@@ -29,10 +29,15 @@ pub const Token = union(Kind) {
 
     let,
     @"return",
+    @"if",
+    @"else",
     underscore,
+
     equal,
     semicolon,
+    period,
     comma,
+    hashtag,
 
     paren_l,
     paren_r,
@@ -46,8 +51,8 @@ pub const Token = union(Kind) {
     colon,
     ampersand,
     pipe,
-    percent,
-    slash,
+    modulo,
+    div,
 
     add,
     add_wrap,
@@ -82,14 +87,23 @@ pub const Token = union(Kind) {
         let,
         /// Consists of `'return'`.
         @"return",
+        /// Consists of `'if'`.
+        @"if",
+        /// Consists of `'else'`.
+        @"else",
         /// Consists of `'_'`.
         underscore,
+
         /// Consists of `'='`.
         equal,
         /// Consists of `';'`.
         semicolon,
+        /// Consists of `'.'`.
+        period,
         /// Consists of `','`.
         comma,
+        /// Consists of `'#'`.
+        hashtag,
 
         /// Consists of `'('`.
         paren_l,
@@ -113,9 +127,9 @@ pub const Token = union(Kind) {
         /// Consists of `'|'`.
         pipe,
         /// Consists of `'%'`.
-        percent,
+        modulo,
         /// Consists of `'/'`.
-        slash,
+        div,
 
         /// Consists of `'+'`.
         add,
@@ -168,11 +182,16 @@ pub const Token = union(Kind) {
 
                 .let => .{ .str = "let" },
                 .@"return" => .{ .str = "return" },
+                .@"if" => .{ .str = "if" },
+                .@"else" => .{ .str = "else" },
                 .underscore => .{ .char = '_' },
+
                 .equal => .{ .char = '=' },
                 .colon => .{ .char = ':' },
                 .semicolon => .{ .char = ';' },
+                .period => .{ .char = '.' },
                 .comma => .{ .char = ',' },
+                .hashtag => .{ .char = '#' },
 
                 .paren_l => .{ .char = '(' },
                 .paren_r => .{ .char = ')' },
@@ -185,8 +204,8 @@ pub const Token = union(Kind) {
 
                 .ampersand => .{ .char = '&' },
                 .pipe => .{ .char = '|' },
-                .percent => .{ .char = '%' },
-                .slash => .{ .char = '/' },
+                .modulo => .{ .char = '%' },
+                .div => .{ .char = '/' },
 
                 .add => .{ .char = '+' },
                 .add_saturate => .{ .str = "+|" },
@@ -203,25 +222,15 @@ pub const Token = union(Kind) {
         }
 
         pub fn toOperator(kind: Kind) ?Operator {
-            const NonExhaustive = @Type(.{ .@"enum" = .{
-                .is_exhaustive = false,
-                .tag_type = @typeInfo(Operator).@"enum".tag_type,
-                .fields = @typeInfo(Operator).@"enum".fields,
-                .decls = &.{},
-            } });
-            const non_exhaustive: NonExhaustive = @enumFromInt(@intFromEnum(kind));
-            return switch (non_exhaustive) {
-                _ => null,
-                else => |value| @enumFromInt(@intFromEnum(value)),
-            };
+            return kind.toSubset(Operator);
         }
 
         pub const Operator = enum(u8) {
             colon = @intFromEnum(Kind.colon),
             ampersand = @intFromEnum(Kind.ampersand),
             pipe = @intFromEnum(Kind.pipe),
-            percent = @intFromEnum(Kind.percent),
-            slash = @intFromEnum(Kind.slash),
+            modulo = @intFromEnum(Kind.modulo),
+            div = @intFromEnum(Kind.div),
 
             add = @intFromEnum(Kind.add),
             add_wrap = @intFromEnum(Kind.add_wrap),
@@ -234,7 +243,56 @@ pub const Token = union(Kind) {
             mul = @intFromEnum(Kind.mul),
             mul_wrap = @intFromEnum(Kind.mul_wrap),
             mul_saturate = @intFromEnum(Kind.mul_saturate),
+
+            pub fn toKind(op: Operator) Kind {
+                return @enumFromInt(@intFromEnum(op));
+            }
         };
+
+        pub fn toKeyword(kind: Kind) Keyword {
+            return kind.toSubset(Keyword);
+        }
+
+        pub const Keyword = enum(u8) {
+            let = @intFromEnum(Kind.let),
+            @"return" = @intFromEnum(Kind.@"return"),
+            @"if" = @intFromEnum(Kind.@"if"),
+            @"else" = @intFromEnum(Kind.@"else"),
+            underscore = @intFromEnum(Kind.underscore),
+
+            pub fn toKind(kw: Keyword) Kind {
+                return @enumFromInt(@intFromEnum(kw));
+            }
+
+            pub fn fromSrc(src: []const u8) ?Keyword {
+                const Kw = enum(u8) {
+                    let = @intFromEnum(Keyword.let),
+                    @"return" = @intFromEnum(Keyword.@"return"),
+                    @"if" = @intFromEnum(Keyword.@"if"),
+                    @"else" = @intFromEnum(Keyword.@"else"),
+                    @"_" = @intFromEnum(Keyword.underscore),
+                };
+                const kw = std.meta.stringToEnum(Kw, src) orelse return null;
+                return @enumFromInt(@intFromEnum(kw));
+            }
+        };
+
+        fn toSubset(
+            kind: Kind,
+            comptime SubsetEnum: type,
+        ) ?SubsetEnum {
+            const NonExhaustive = @Type(.{ .@"enum" = .{
+                .is_exhaustive = false,
+                .tag_type = @typeInfo(SubsetEnum).@"enum".tag_type,
+                .fields = @typeInfo(SubsetEnum).@"enum".fields,
+                .decls = &.{},
+            } });
+            const non_exhaustive: NonExhaustive = @enumFromInt(@intFromEnum(kind));
+            return switch (non_exhaustive) {
+                _ => null,
+                else => |value| @enumFromInt(@intFromEnum(value)),
+            };
+        }
     };
 
     pub fn getKind(token: Token) Kind {
@@ -364,16 +422,23 @@ pub fn peekToken(
                     break :sw .{ .whitespace, .start };
                 },
 
-                inline '=', ':', ';', ',', '&', '|', '%', '/', '(', ')', '[', ']', '{', '}' => |char| {
+                inline // zig fmt: off
+                '=', ':', ';', '.', ',', '#',
+                '&', '|', '%', '/',
+                '(', ')', '[', ']', '{', '}',
+                // zig fmt: on
+                => |char| {
                     const kind: Token.Kind = comptime switch (char) {
                         '=' => .equal,
                         ':' => .colon,
                         ';' => .semicolon,
+                        '.' => .period,
                         ',' => .comma,
+                        '#' => .hashtag,
                         '&' => .ampersand,
                         '|' => .pipe,
-                        '%' => .percent,
-                        '/' => .slash,
+                        '%' => .modulo,
+                        '/' => .div,
                         '(' => .paren_l,
                         ')' => .paren_r,
                         '[' => .bracket_l,
@@ -451,19 +516,9 @@ pub fn peekToken(
             } else .{ src.bufferedLen(), false };
             const token_is_done = eof or delim;
 
-            const Kw = enum {
-                let,
-                @"return",
-                @"_",
-            };
-            if (std.meta.stringToEnum(Kw, src.buffered()[0..buffered_end])) |kw| {
+            if (Token.Kind.Keyword.fromSrc(src.buffered()[0..buffered_end])) |kw| {
                 std.debug.assert(token_is_done);
-                const kind: Token.Kind = switch (kw) {
-                    .let => .let,
-                    .@"return" => .@"return",
-                    ._ => .underscore,
-                };
-                break :sw .{ kind, .start };
+                break :sw .{ kw.toKind(), .start };
             }
             break :sw .{
                 .ident,
@@ -674,14 +729,26 @@ test Lexer {
     try expectTokenization("", &.{});
     try expectTokenization(" \n", &.{.init(.whitespace, " \n")});
     try expectTokenization("let", &.{.static(.let)});
+    try expectTokenization("if", &.{.static(.@"if")});
+    try expectTokenization("else", &.{.static(.@"else")});
     try expectTokenization("return", &.{.static(.@"return")});
     try expectTokenization("foo", &.{.init(.ident, "foo")});
     try expectTokenization("10_024.0", &.{.init(.number, "10_024.0")});
     try expectTokenization("-10_024.0u5", &.{.init(.number, "-10_024.0u5")});
+    try expectTokenization("1 + -1", &.{
+        .init(.number, "1"),
+        .space,
+        .static(.add),
+        .space,
+        .init(.number, "-1"),
+    });
     try expectTokenization("_", &.{.static(.underscore)});
     try expectTokenization(":", &.{.static(.colon)});
     try expectTokenization("=", &.{.static(.equal)});
     try expectTokenization(";", &.{.static(.semicolon)});
+    try expectTokenization(".", &.{.static(.period)});
+    try expectTokenization(",", &.{.static(.comma)});
+    try expectTokenization("#", &.{.static(.hashtag)});
     try expectTokenization("(", &.{.static(.paren_l)});
     try expectTokenization(")", &.{.static(.paren_r)});
     try expectTokenization("[", &.{.static(.bracket_l)});
@@ -691,7 +758,7 @@ test Lexer {
 
     try expectTokenization("&", &.{.static(.ampersand)});
     try expectTokenization("|", &.{.static(.pipe)});
-    try expectTokenization("%", &.{.static(.percent)});
+    try expectTokenization("%", &.{.static(.modulo)});
 
     try expectTokenization("+", &.{.static(.add)});
     try expectTokenization("+%", &.{.static(.add_wrap)});
