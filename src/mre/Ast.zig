@@ -173,6 +173,39 @@ pub const Node = union(enum(u8)) {
             return extra_data[block.start..block.end];
         }
 
+        /// Returns `.null` if this block has no label (ergo also returns `.null` if it's the root block).
+        /// The prefix token is the return value minus one.
+        pub fn getLabel(block: Block, tokens: Tokens) Tokens.Value.Index {
+            const token_kinds = tokens.tokenKinds();
+            var index = block.open_brace.toInt() orelse return .null;
+            std.debug.assert(token_kinds[index] == .brace_l);
+
+            if (index == 0) return .null;
+            index -= 1;
+            if (token_kinds[index] == .whitespace) {
+                if (index == 0) return .null;
+                index -= 1;
+            }
+
+            if (token_kinds[index] != .colon) return .null;
+
+            if (index == 0) return .null;
+            index -= 1;
+            if (token_kinds[index] == .whitespace) {
+                if (index == 0) return .null;
+                index -= 1;
+            }
+
+            if (token_kinds[index] != .ident) return .null;
+            const ident_tok: Tokens.Value.Index = .fromInt(index);
+
+            if (index == 0) return .null;
+            index -= 1;
+
+            if (token_kinds[index] != .hashtag) return .null;
+
+            return ident_tok;
+        }
 
         /// Returns `.null` if this is the root block (i.e. if `block.open_brace == .null`).
         pub fn getCloseBrace(
@@ -710,6 +743,46 @@ const Parser = struct {
                 .brace_r => parser.tokens_index += 1,
                 else => std.debug.panic("TODO: handle missing closing brace", .{}),
             },
+
+            // just skip the label, we don't store it, instead we get it by searching for it
+            // starting from the open brace.
+            .expect_hashtag => |data| {
+                std.debug.assert(token_kinds[parser.tokens_index] == .hashtag);
+                parser.tokens_index += 1;
+                switch (token_kinds[parser.tokens_index]) {
+                    else => |t| std.debug.panic("TODO: {t}", .{t}),
+                    .whitespace => {
+                        if (token_kinds[parser.tokens_index + 1] == .ident) {
+                            std.debug.panic("TODO: report invalid space between hashtag and identifier.", .{});
+                        } else {
+                            std.debug.panic("TODO: report unexpected hashtag", .{});
+                        }
+                    },
+                    .ident => {},
+                }
+                parser.tokens_index += 1;
+                parser.skipWhitespace();
+
+                switch (token_kinds[parser.tokens_index]) {
+                    else => |t| std.debug.panic("TODO: {t}", .{t}),
+                    .whitespace => unreachable,
+                    .colon => {},
+                }
+
+                parser.tokens_index += 1;
+                parser.skipWhitespace();
+
+                switch (token_kinds[parser.tokens_index]) {
+                    else => |t| std.debug.panic("TODO: {t}", .{t}),
+                    .whitespace => unreachable,
+                    .brace_l => {},
+                }
+                continue :main_sw .{
+                    .expect_expr = .{
+                        .dst_node = data.dst_node,
+                    },
+                };
+            },
             .expect_statement_or_expr => |data| switch (token_kinds[parser.tokens_index]) {
                 .whitespace => unreachable,
                 else => {
@@ -726,6 +799,12 @@ const Parser = struct {
                 switch (token_kinds[parser.tokens_index]) {
                     else => |t| std.debug.panic("TODO: {t}", .{t}),
                     .whitespace => unreachable,
+
+                    .hashtag => continue :main_sw .{
+                        .expect_hashtag = .{
+                            .dst_node = data.dst_node,
+                        },
+                    },
 
                     .ident,
                     .number,
@@ -980,6 +1059,9 @@ const Parser = struct {
         expect_expr: struct {
             dst_node: Node.Index,
         },
+        expect_hashtag: struct {
+            dst_node: Node.Index,
+        },
         expect_expr_primary: struct {
             dst_node: Node.Index,
         },
@@ -1199,8 +1281,8 @@ test Ast {
     const gpa = std.testing.allocator;
 
     const tokens: Tokens = try .tokenizeSlice(gpa,
-        \\{
-        \\    (32u8 + 1) * 3:u8;
+        \\#blk: {
+        \\    (32u8 + 1) * -3:u8;
         \\}
     );
     defer tokens.deinit(gpa);
@@ -1216,7 +1298,7 @@ test Ast {
                     .rhs = &.initValueRef(.number, "1"),
                 }) },
                 .rhs = &.initBinOp(.colon, .{
-                    .lhs = &.initValueRef(.number, "3"),
+                    .lhs = &.initValueRef(.number, "-3"),
                     .rhs = &.initValueRef(.ident, "u8"),
                 }),
             }),
