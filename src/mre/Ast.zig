@@ -14,12 +14,15 @@ pub fn deinit(ast: Ast, gpa: std.mem.Allocator) void {
     gpa.free(ast.extra_data);
 }
 
+pub fn get(ast: Ast, index: Node.Index) Node.Packed {
+    return ast.nodes.get(index.toIntAllowRoot());
+}
+
 pub const Node = union(enum(u8)) {
     value_ref: ValueRef,
-    grouped: Grouped,
     un_op: UnOp,
     bin_op: BinOp,
-    list: List,
+    grouped: Grouped,
     block: Block,
 
     pub const null_init: Node = .{ .null = .{ 0, .init(0, 0) } };
@@ -138,45 +141,54 @@ pub const Node = union(enum(u8)) {
         }
     };
 
-    pub const List = struct {
+    pub const Block = struct {
+        /// This is `null` for the root block.
+        open_brace: Tokens.Value.Index,
         start: u32,
         end: u32,
-        /// Either points to the trailing comma, or to the last token of the last element in the list.
-        end_tok: Tokens.Value.Index,
 
-        pub fn getNodesLen(list: List) u32 {
-            return list.end - list.start;
-        }
-
-        pub fn getNodes(
-            list: List,
-            /// The `extra_data` field of `Ast`.
-            extra_data: []const u32,
-        ) []const Node.Index {
-            return @ptrCast(extra_data[list.start..list.end]);
-        }
-
-        pub fn unpack(main_token: Tokens.Value.Index, data: Packed.Data) List {
+        pub fn unpack(main_token: Tokens.Value.Index, data: Packed.Data) Block {
             return .{
-                .end_tok = main_token,
+                .open_brace = main_token,
                 .start = data.lhs,
                 .end = data.rhs,
             };
         }
 
-        pub fn pack(list: List) struct { Tokens.Value.Index, Packed.Data } {
-            return .{ list.end_tok, .init(list.start, list.end) };
+        pub fn pack(block: Block) struct { Tokens.Value.Index, Packed.Data } {
+            return .{ block.open_brace, .init(block.start, block.end) };
         }
-    };
 
-    pub const Block = struct {
-        start: u32,
-        end: u32,
-        /// NOTE: for the root block, this is eof.
-        closing_brace: Tokens.Value.Index,
-
-        pub fn getNodesLen(block: Block) u32 {
+        /// Returns the length of the slice returned by `block.getExtraData(extra_data)`.
+        pub fn getExtraDataLen(block: Block) u32 {
             return block.end - block.start;
+        }
+
+        /// The full slice of extra data owned by this block.
+        pub fn getExtraData(
+            block: Block,
+            /// The `extra_data` field of `Ast`.
+            extra_data: []const u32,
+        ) []const u32 {
+            return extra_data[block.start..block.end];
+        }
+
+
+        /// Returns `.null` if this is the root block (i.e. if `block.open_brace == .null`).
+        pub fn getCloseBrace(
+            block: Block,
+            /// The `extra_data` field of `Ast`.
+            extra_data: []const u32,
+        ) Tokens.Value.Index {
+            if (block.open_brace == .null) return .null;
+            const block_extra_data = block.getExtraData(extra_data);
+            const index = block_extra_data[block_extra_data.len - 1];
+            return .fromInt(index);
+        }
+
+        /// Returns the length of the slice returned by `block.getNodes(extra_data)`.
+        pub fn getNodesLen(block: Block) u32 {
+            return block.getExtraDataLen() - @intFromBool(block.open_brace != .null);
         }
 
         pub fn getNodes(
@@ -184,21 +196,20 @@ pub const Node = union(enum(u8)) {
             /// The `extra_data` field of `Ast`.
             extra_data: []const u32,
         ) []const Node.Index {
-            return @ptrCast(extra_data[block.start..block.end]);
-        }
-
-        pub fn unpack(main_token: Tokens.Value.Index, data: Packed.Data) Block {
-            return .{
-                .closing_brace = main_token,
-                .start = data.lhs,
-                .end = data.rhs,
-            };
-        }
-
-        pub fn pack(block: Block) struct { Tokens.Value.Index, Packed.Data } {
-            return .{ block.closing_brace, .init(block.start, block.end) };
+            const block_extra_data = block.getExtraData(extra_data);
+            return @ptrCast(block_extra_data[0..block.getNodesLen()]);
         }
     };
+
+    pub fn getLastToken(node: Node, ast: Ast) Tokens.Value.Index {
+        return sw: switch (node) {
+            .value_ref => |value_ref| value_ref.main_token,
+            .grouped => |grouped| grouped.paren_r,
+            .un_op => |un_op| continue :sw ast.get(un_op.operand).unpack(),
+            .bin_op => |bin_op| continue :sw ast.get(bin_op.rhs).unpack(),
+            .block => |block| block.getCloseBrace(ast.extra_data),
+        };
+    }
 
     pub const Packed = extern struct {
         tag: Tag,
@@ -456,7 +467,6 @@ pub const NodeFmt = struct {
                         _ => unreachable,
                     }
                 },
-                .list => |list| std.debug.panic("TODO: {}", .{list}),
                 .block => |block| {
                     var state = pending.state.block;
                     const block_nodes = block.getNodes(self.ast.extra_data);
@@ -640,6 +650,7 @@ const Parser = struct {
         std.debug.assert(root_node == Node.Index.root);
 
         try parser.states.append(gpa, .{ .expect_block_statements = .{
+            .open_brace = .null,
             .dst_node = root_node,
             .scratch_start = @intCast(parser.scratch.items.len),
         } });
@@ -650,8 +661,15 @@ const Parser = struct {
                 std.debug.assert(parser.scratch.items.len >= scratch_start);
                 defer std.debug.assert(parser.scratch.items.len >= scratch_start);
 
-                const closing_brace: Tokens.Value.Index = switch (token_kinds[parser.tokens_index]) {
-                    .eof, .brace_r => .fromInt(parser.tokens_index),
+                const maybe_close_brace: Tokens.Value.Index = switch (token_kinds[parser.tokens_index]) {
+                    .eof => blk: {
+                        std.debug.assert(data.open_brace == .null);
+                        break :blk .null;
+                    },
+                    .brace_r => blk: {
+                        std.debug.assert(data.open_brace != .null);
+                        break :blk .fromInt(parser.tokens_index);
+                    },
                     else => {
                         const block_item_node = try parser.addNode(gpa, undefined);
                         try parser.scratch.append(gpa, block_item_node.toInt().?);
@@ -668,14 +686,24 @@ const Parser = struct {
                 };
 
                 const extra_start: u32 = @intCast(parser.extra_data.items.len);
-                try parser.extra_data.appendSlice(gpa, parser.scratch.items[scratch_start..]);
+                {
+                    const node_list = parser.scratch.items[scratch_start..];
+                    try parser.extra_data.ensureUnusedCapacity(
+                        gpa,
+                        node_list.len + @intFromBool(maybe_close_brace != .null),
+                    );
+                    parser.extra_data.appendSliceAssumeCapacity(node_list);
+                    if (maybe_close_brace.toInt()) |close_brace| {
+                        parser.extra_data.appendAssumeCapacity(close_brace);
+                    }
+                    parser.scratch.shrinkRetainingCapacity(scratch_start);
+                }
                 const extra_end: u32 = @intCast(parser.extra_data.items.len);
-                parser.scratch.shrinkRetainingCapacity(scratch_start);
 
                 parser.nodes.set(data.dst_node.toIntAllowRoot(), .pack(.{ .block = .{
+                    .open_brace = data.open_brace,
                     .start = extra_start,
                     .end = extra_end,
-                    .closing_brace = closing_brace,
                 } }));
             },
             .expect_closing_brace => switch (token_kinds[parser.tokens_index]) {
@@ -736,12 +764,14 @@ const Parser = struct {
                         });
                     },
                     .brace_l => {
+                        const open_brace: Tokens.Value.Index = .fromInt(parser.tokens_index);
                         parser.tokens_index += 1;
                         try parser.states.appendSlice(gpa, &.{
                             .expect_closing_brace,
                             .{
                                 .expect_block_statements = .{
                                     .dst_node = data.dst_node,
+                                    .open_brace = open_brace,
                                     .scratch_start = @intCast(parser.scratch.items.len),
                                 },
                             },
@@ -814,7 +844,7 @@ const Parser = struct {
 
                 const current_expr = parser.nodes.get(data.dst_node.toInt().?);
                 switch (current_expr.unpack()) {
-                    .value_ref, .grouped, .un_op, .list, .block => {
+                    .value_ref, .un_op, .grouped, .block => {
                         const lhs_expr_node = try parser.addNode(gpa, current_expr);
                         parser.nodes.set(data.dst_node.toInt().?, .pack(.{ .bin_op = .{
                             .lhs = lhs_expr_node,
@@ -842,7 +872,7 @@ const Parser = struct {
                     switch (bind_which) {
                         .lhs => break .lhs,
                         .rhs => switch (parser.nodes.items(.tag)[lhs_bin_op.rhs.toInt().?]) {
-                            .value_ref, .grouped, .un_op, .list, .block => break .rhs,
+                            .value_ref, .un_op, .grouped, .block => break .rhs,
                             .bin_op => {
                                 lhs_bin_op_index = lhs_bin_op.rhs;
                                 continue;
@@ -866,7 +896,7 @@ const Parser = struct {
                     .rhs => {
                         switch (parser.nodes.items(.tag)[lhs_bin_op.rhs.toInt().?]) {
                             .bin_op => unreachable,
-                            .value_ref, .grouped, .un_op, .list, .block => {},
+                            .value_ref, .un_op, .grouped, .block => {},
                         }
                         const rhs_outer_expr_node = try parser.addNode(gpa, .pack(.{ .bin_op = .{
                             .lhs = lhs_bin_op.rhs,
@@ -914,16 +944,12 @@ const Parser = struct {
                 }
             },
         };
-
-        const block = parser.nodes.get(root_node.toIntAllowRoot()).unpack().block;
-        if (parser.tokens.getKind(block.closing_brace) != .eof) {
-            std.debug.panic("TODO: handle trailing rbrace", .{});
-        }
     }
 
     const State = union(enum) {
         expect_block_statements: struct {
             dst_node: Node.Index,
+            open_brace: Tokens.Value.Index,
             scratch_start: u32,
         },
         expect_closing_brace,
@@ -1009,14 +1035,13 @@ const Parser = struct {
 
 const TestNode = union(Node.Tag) {
     value_ref: struct { Node.ValueRef.Kind, []const u8 },
-    grouped: *const TestNode,
     un_op: struct { Lexer.Token.Kind, *const TestNode },
     bin_op: struct {
         lhs: *const TestNode,
         op: Lexer.Token.Kind,
         rhs: *const TestNode,
     },
-    list: []const TestNode,
+    grouped: *const TestNode,
     block: []const TestNode,
 
     fn initValueRef(kind: Node.ValueRef.Kind, str: []const u8) TestNode {
@@ -1041,18 +1066,29 @@ const TestNode = union(Node.Tag) {
         } };
     }
 
-    fn initList(nodes: []const TestNode) TestNode {
-        return .{ .list = nodes };
-    }
-
     fn initBlock(nodes: []const TestNode) TestNode {
         return .{ .block = nodes };
     }
 };
 
+fn expectSrcAst(
+    src: []const u8,
+    expected: TestNode,
+) !void {
+    const gpa = std.testing.allocator;
+
+    const tokens: Tokens = try .tokenizeSlice(gpa, src);
+    defer tokens.deinit(gpa);
+
+    const ast: Ast = try .parse(gpa, tokens);
+    defer ast.deinit(gpa);
+
+    try expectEqualAstNode(tokens, ast, .root, expected);
+}
+
 fn expectEqualAstNode(
-    ast: Ast,
     tokens: Tokens,
+    ast: Ast,
     actual_base_node: Node.Index,
     expected: TestNode,
 ) !void {
@@ -1087,13 +1123,6 @@ fn expectEqualAstNode(
                     try std.testing.expectEqualStrings(expected_str, actual_valref.getSrc(tokens));
                     try std.testing.expectEqual(expected_kind, actual_valref.getKind(tokens));
                 },
-                .grouped => |expected_grouped| {
-                    const actual_grouped = actual_packed.unpack().grouped;
-                    states.appendAssumeCapacity(.{ .any = .{
-                        .expected = expected_grouped.*,
-                        .actual_node = actual_grouped.expr,
-                    } });
-                },
                 .un_op => |expected_un_op| {
                     const expected_kind, const expected_operand = expected_un_op;
                     const actual_un_op = actual_packed.unpack().un_op;
@@ -1117,12 +1146,11 @@ fn expectEqualAstNode(
                         } },
                     });
                 },
-                .list => |expected_list| {
-                    const actual_list = actual_packed.unpack().list;
-                    states.appendAssumeCapacity(.{ .cmp_slices = .{
-                        .expected = expected_list,
-                        .actual = actual_list.getNodes(ast.extra_data),
-                        .index = 0,
+                .grouped => |expected_grouped| {
+                    const actual_grouped = actual_packed.unpack().grouped;
+                    states.appendAssumeCapacity(.{ .any = .{
+                        .expected = expected_grouped.*,
+                        .actual_node = actual_grouped.expr,
                     } });
                 },
                 .block => |expected_block| {
@@ -1172,7 +1200,7 @@ test Ast {
     const ast: Ast = try .parse(gpa, tokens);
     defer ast.deinit(gpa);
 
-    try expectEqualAstNode(ast, tokens, .root, .initBlock(&.{
+    try expectEqualAstNode(tokens, ast, .root, .initBlock(&.{
         .initBlock(&.{
             .initBinOp(.mul, .{
                 .lhs = &.{ .grouped = &.initBinOp(.add, .{
