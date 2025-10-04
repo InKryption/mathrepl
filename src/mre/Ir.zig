@@ -31,6 +31,9 @@ pub const Inst = union(Tag) {
 
     typed: Typed,
 
+    negate: UnOp,
+    negate_wrap: UnOp,
+
     add: BinOp,
     add_wrap: BinOp,
     add_saturate: BinOp,
@@ -44,6 +47,11 @@ pub const Inst = union(Tag) {
     mul_saturate: BinOp,
 
     div: BinOp,
+
+    if_true: IfTrue,
+    if_else: IfElse,
+
+    block: Block,
 
     pub const Index = enum(Int) {
         pub const Int = u32;
@@ -104,6 +112,9 @@ pub const Inst = union(Tag) {
 
             typed: Typed,
 
+            negate: UnOp,
+            negate_wrap: UnOp,
+
             add: BinOp,
             add_wrap: BinOp,
             add_saturate: BinOp,
@@ -117,6 +128,11 @@ pub const Inst = union(Tag) {
             mul_saturate: BinOp,
 
             div: BinOp,
+
+            if_true: IfTrue,
+            if_else: IfElse,
+
+            block: Block,
         };
 
         pub fn unpack(self: Packed) Inst {
@@ -174,9 +190,44 @@ pub const Inst = union(Tag) {
         type: Inst.Index,
     };
 
+    pub const UnOp = packed struct(u32) {
+        operand: Inst.Index,
+    };
+
     pub const BinOp = extern struct {
         lhs: Inst.Index,
         rhs: Inst.Index,
+    };
+
+    pub const IfTrue = extern struct {
+        cond: Inst.Index,
+        true_branch: Inst.Index,
+    };
+
+    pub const IfElse = extern struct {
+        cond: Inst.Index,
+        branches: u32,
+
+        pub fn getBranches(
+            if_else: IfElse,
+            /// The `extra_data` field of `Ir`.
+            extra_data: []const u32,
+        ) *const [2]Inst.Index {
+            return @ptrCast(extra_data[if_else.branches..][0..2]);
+        }
+    };
+
+    pub const Block = extern struct {
+        start: u32,
+        end: u32,
+
+        pub fn getInsts(
+            block: Block,
+            /// The `extra_data` field of `Ir`.
+            extra_data: []const u32,
+        ) []const Inst.Index {
+            return @ptrCast(extra_data[block.start..block.end]);
+        }
     };
 };
 
@@ -261,6 +312,26 @@ const State = union(enum) {
             return .{ .dst = dst, .node = node };
         }
     },
+    expect_expr: struct {
+        dst: Inst.Index,
+        node: Ast.Node.Index,
+
+        fn init(dst: Inst.Index, node: Ast.Node.Index) @This() {
+            return .{ .dst = dst, .node = node };
+        }
+    },
+    handle_block: struct {
+        dst: Inst.Index,
+        node: Ast.Node.Index,
+        index: u32,
+        scratch_start: u32,
+
+        fn forNext(state: @This()) @This() {
+            var copy = state;
+            copy.index += 1;
+            return copy;
+        }
+    },
 };
 
 const Generator = struct {
@@ -301,9 +372,30 @@ const Generator = struct {
         gpa: std.mem.Allocator,
     ) std.mem.Allocator.Error!void {
         while (gen.states.pop()) |state| switch (state) {
-            .handle_statement_or_expr => |soe| switch (gen.ast.nodes.get(soe.node.toInt().?).unpack()) {
-                else => std.debug.panic("TODO", .{}),
-                .value_ref => |value_ref| try gen.handleExprValueRef(gpa, soe.dst, value_ref),
+            .handle_statement_or_expr => |soe| {
+                try gen.states.append(gpa, .{ .expect_expr = .init(soe.dst, soe.node) });
+            },
+            .expect_expr => |expr| switch (gen.ast.nodes.get(expr.node.toInt().?).unpack()) {
+                .grouped => |grouped| gen.states.appendAssumeCapacity(.{ .handle_statement_or_expr = .{
+                    .dst = expr.dst,
+                    .node = grouped.expr,
+                } }),
+                .value_ref => |value_ref| try gen.handleExprValueRef(gpa, expr.dst, value_ref),
+                .un_op => |un_op| {
+                    const op_tok = gen.tokens.getNonNull(un_op.op);
+                    const op_kind = op_tok.kind.toOperator().?;
+
+                    try gen.states.ensureUnusedCapacity(gpa, 1);
+                    try gen.insts.ensureUnusedCapacity(gpa, 1);
+                    const new_inst = gen.addInstAssumeCapacityUndef();
+                    gen.states.appendAssumeCapacity(.{ .handle_statement_or_expr = .init(new_inst, un_op.operand) });
+                    const inst_value: Inst = switch (op_kind) {
+                        else => std.debug.panic("TODO", .{}),
+                        .sub => .{ .negate = .{ .operand = new_inst } },
+                        .sub_wrap => .{ .negate_wrap = .{ .operand = new_inst } },
+                    };
+                    gen.insts.set(expr.dst.toInt().?, .pack(inst_value));
+                },
                 .bin_op => |bin_op| {
                     const op_tok = gen.tokens.getNonNull(bin_op.op);
                     const op_kind = op_tok.kind.toOperator() orelse std.debug.panic("TODO", .{});
@@ -317,7 +409,7 @@ const Generator = struct {
 
                     switch (op_kind) {
                         .colon => {
-                            gen.insts.set(soe.dst.toInt().?, .pack(.{ .typed = .{
+                            gen.insts.set(expr.dst.toInt().?, .pack(.{ .typed = .{
                                 .operand = lhs_inst,
                                 .type = rhs_inst,
                             } }));
@@ -343,13 +435,112 @@ const Generator = struct {
                         .mul_saturate,
                         => |ikind| {
                             const op_tag = @field(Inst.Tag, @tagName(ikind));
-                            gen.insts.set(soe.dst.toInt().?, .pack(@unionInit(Inst, @tagName(op_tag), .{
+                            gen.insts.set(expr.dst.toInt().?, .pack(@unionInit(Inst, @tagName(op_tag), .{
                                 .lhs = lhs_inst,
                                 .rhs = rhs_inst,
                             })));
                         },
                     }
                 },
+                .if_else => |if_else| {
+                    const if_true, const if_false = if_else.getBranchNodes(gen.ast.extra_data);
+
+                    try gen.insts.ensureUnusedCapacity(gpa, 3);
+                    const cond_inst = gen.addInstAssumeCapacityUndef();
+                    const true_branch_inst = gen.addInstAssumeCapacityUndef();
+
+                    switch (if_false) {
+                        .null => {
+                            gen.insts.set(expr.dst.toInt().?, .pack(.{
+                                .if_true = .{
+                                    .cond = cond_inst,
+                                    .true_branch = true_branch_inst,
+                                },
+                            }));
+                            try gen.states.appendSlice(gpa, &.{
+                                .{
+                                    .expect_expr = .{
+                                        .dst = true_branch_inst,
+                                        .node = if_true,
+                                    },
+                                },
+                                .{
+                                    .expect_expr = .{
+                                        .dst = cond_inst,
+                                        .node = if_else.cond,
+                                    },
+                                },
+                            });
+                        },
+                        _ => {
+                            const false_branch_inst = gen.addInstAssumeCapacityUndef();
+                            const extra_data_start: u32 = @intCast(gen.extra_data.items.len);
+                            try gen.extra_data.appendSlice(gpa, &.{
+                                true_branch_inst.toInt().?,
+                                false_branch_inst.toInt().?,
+                            });
+                            gen.insts.set(expr.dst.toInt().?, .pack(.{
+                                .if_else = .{
+                                    .cond = cond_inst,
+                                    .branches = extra_data_start,
+                                },
+                            }));
+
+                            try gen.states.appendSlice(gpa, &.{
+                                .{
+                                    .expect_expr = .{
+                                        .dst = false_branch_inst,
+                                        .node = if_false,
+                                    },
+                                },
+                                .{
+                                    .expect_expr = .{
+                                        .dst = true_branch_inst,
+                                        .node = if_true,
+                                    },
+                                },
+                                .{
+                                    .expect_expr = .{
+                                        .dst = cond_inst,
+                                        .node = if_else.cond,
+                                    },
+                                },
+                            });
+                        },
+                    }
+                },
+                .block => {
+                    try gen.states.append(gpa, .{ .handle_block = .{
+                        .dst = expr.dst,
+                        .node = expr.node,
+                        .index = 0,
+                        .scratch_start = @intCast(gen.scratch.items.len),
+                    } });
+                },
+            },
+            .handle_block => |block_state| blk: {
+                const block = gen.ast.nodes.get(block_state.node.toInt().?).unpack().block;
+                const block_nodes = block.getNodes(gen.ast.extra_data);
+                if (block_state.index == block_nodes.len) {
+                    const extra_start: u32 = @intCast(gen.extra_data.items.len);
+                    try gen.extra_data.appendSlice(gpa, gen.scratch.items[block_state.scratch_start..]);
+                    const extra_end: u32 = @intCast(gen.extra_data.items.len);
+                    gen.scratch.shrinkRetainingCapacity(block_state.scratch_start);
+                    gen.insts.set(block_state.dst.toInt().?, .pack(.{ .block = .{
+                        .start = extra_start,
+                        .end = extra_end,
+                    } }));
+                    break :blk;
+                }
+                try gen.states.ensureUnusedCapacity(gpa, 2);
+                try gen.scratch.ensureUnusedCapacity(gpa, 1);
+                try gen.insts.ensureUnusedCapacity(gpa, 1);
+                const soe_inst = gen.addInstAssumeCapacityUndef();
+                gen.scratch.appendAssumeCapacity(soe_inst.toInt().?);
+                gen.states.appendSliceAssumeCapacity(&.{
+                    .{ .handle_block = block_state.forNext() },
+                    .{ .handle_statement_or_expr = .init(soe_inst, block_nodes[block_state.index]) },
+                });
             },
         };
     }
