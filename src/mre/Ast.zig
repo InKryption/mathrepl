@@ -639,6 +639,9 @@ const Parser = struct {
     nodes: *Node.Packed.List,
     extra_data: *std.ArrayList(u32),
     scratch: *std.ArrayList(u32),
+    /// NOTE: should not `*AssumeCapacity` in any branches as a rule, because
+    /// even though the normal flow is for the state to come from `parser.states.pop()`,
+    /// it may also come from a direct continuation on the switch.
     states: *std.ArrayList(State),
 
     const ParseError = error{ParseFail};
@@ -654,7 +657,7 @@ const Parser = struct {
             .dst_node = root_node,
             .scratch_start = @intCast(parser.scratch.items.len),
         } });
-        mainloop: while (parser.states.pop()) |state| switch (state) {
+        while (parser.states.pop()) |state| main_sw: switch (state) {
             .expect_block_statements => |data| {
                 parser.skipWhitespace();
                 const scratch_start: u32 = data.scratch_start;
@@ -673,15 +676,12 @@ const Parser = struct {
                     else => {
                         const block_item_node = try parser.addNode(gpa, undefined);
                         try parser.scratch.append(gpa, block_item_node.toInt().?);
-                        try parser.states.appendSlice(gpa, &.{
-                            .{ .expect_block_statements = data },
-                            .{
-                                .expect_statement_or_expr = .{
-                                    .dst_node = block_item_node,
-                                },
+                        try parser.states.append(gpa, .{ .expect_block_statements = data });
+                        continue :main_sw .{
+                            .expect_statement_or_expr = .{
+                                .dst_node = block_item_node,
                             },
-                        });
-                        continue :mainloop;
+                        };
                     },
                 };
 
@@ -711,27 +711,47 @@ const Parser = struct {
                 else => std.debug.panic("TODO: handle missing closing brace", .{}),
             },
             .expect_statement_or_expr => |data| switch (token_kinds[parser.tokens_index]) {
-                else => |t| std.debug.panic("TODO: {t}", .{t}),
                 .whitespace => unreachable,
-                .ident,
-                .number,
-                .paren_l,
-                .brace_l,
-                .sub,
-                .sub_wrap,
-                => {
-                    try parser.states.appendSlice(gpa, &[_]State{
-                        .handle_semicolon_after_expr,
-                    } ++ State.expectFullExpr(data.dst_node));
+                else => {
+                    try parser.states.append(gpa, .handle_semicolon_after_expr);
+                    continue :main_sw .{
+                        .expect_expr = .{
+                            .dst_node = data.dst_node,
+                        },
+                    };
                 },
             },
+            .expect_expr => |data| {
+                parser.skipWhitespace();
+                switch (token_kinds[parser.tokens_index]) {
+                    else => |t| std.debug.panic("TODO: {t}", .{t}),
+                    .whitespace => unreachable,
+
+                    .ident,
+                    .number,
+                    .paren_l,
+                    .brace_l,
+                    .sub,
+                    .sub_wrap,
+                    => try parser.states.appendSlice(gpa, &.{
+                        .{
+                            .handle_expr_secondary = .{
+                                .dst_node = data.dst_node,
+                            },
+                        },
+                        .{
+                            .expect_expr_primary = .{
+                                .dst_node = data.dst_node,
+                            },
+                        },
+                    }),
+                }
+            },
             .expect_expr_primary => |data| {
-                sw: switch (token_kinds[parser.tokens_index]) {
+                parser.skipWhitespace();
+                switch (token_kinds[parser.tokens_index]) {
                     else => unreachable,
-                    .whitespace => {
-                        parser.skipWhitespace();
-                        continue :sw token_kinds[parser.tokens_index];
-                    },
+                    .whitespace => unreachable,
                     .sub, .sub_wrap => {
                         const op_tok: Tokens.Value.Index = .fromInt(parser.tokens_index);
                         parser.tokens_index += 1;
@@ -745,11 +765,11 @@ const Parser = struct {
                             .op = op_tok,
                             .operand = operand_node,
                         } }));
-                        parser.states.appendAssumeCapacity(.{
+                        continue :main_sw .{
                             .expect_expr_primary = .{
                                 .dst_node = operand_node,
                             },
-                        });
+                        };
                     },
                     .ident, .number => {
                         parser.nodes.set(data.dst_node.toInt().?, .pack(.{
@@ -757,25 +777,23 @@ const Parser = struct {
                         }));
                     },
                     .paren_l => {
-                        parser.states.appendAssumeCapacity(.{
+                        continue :main_sw .{
                             .expect_grouped_start = .{
                                 .dst_node = data.dst_node,
                             },
-                        });
+                        };
                     },
                     .brace_l => {
                         const open_brace: Tokens.Value.Index = .fromInt(parser.tokens_index);
                         parser.tokens_index += 1;
-                        try parser.states.appendSlice(gpa, &.{
-                            .expect_closing_brace,
-                            .{
-                                .expect_block_statements = .{
-                                    .dst_node = data.dst_node,
-                                    .open_brace = open_brace,
-                                    .scratch_start = @intCast(parser.scratch.items.len),
-                                },
+                        try parser.states.append(gpa, .expect_closing_brace);
+                        continue :main_sw .{
+                            .expect_block_statements = .{
+                                .dst_node = data.dst_node,
+                                .open_brace = open_brace,
+                                .scratch_start = @intCast(parser.scratch.items.len),
                             },
-                        });
+                        };
                     },
                 }
             },
@@ -811,20 +829,18 @@ const Parser = struct {
                         parser.tokens_index += 1;
                         parser.skipWhitespace();
                         const rhs_expr_node = try parser.addNode(gpa, undefined);
-                        try parser.states.appendSlice(gpa, &.{
-                            .{
-                                .join_expr_secondary = .{
-                                    .dst_node = data.dst_node,
-                                    .rhs_op_tok = rhs_op_tok,
-                                    .rhs_expr = rhs_expr_node,
-                                },
-                            },
-                            .{
-                                .expect_expr_primary = .{
-                                    .dst_node = rhs_expr_node,
-                                },
+                        try parser.states.append(gpa, .{
+                            .join_expr_secondary = .{
+                                .dst_node = data.dst_node,
+                                .rhs_op_tok = rhs_op_tok,
+                                .rhs_expr = rhs_expr_node,
                             },
                         });
+                        continue :main_sw .{
+                            .expect_expr_primary = .{
+                                .dst_node = rhs_expr_node,
+                            },
+                        };
                     },
                 }
             },
@@ -851,7 +867,7 @@ const Parser = struct {
                             .op = rhs_op_tok,
                             .rhs = data.rhs_expr,
                         } }));
-                        continue :mainloop;
+                        break :main_sw;
                     },
                     .bin_op => {},
                 }
@@ -923,7 +939,12 @@ const Parser = struct {
                             .inner_expr = inner_expr_node,
                         },
                     },
-                } ++ State.expectFullExpr(inner_expr_node));
+                    .{
+                        .expect_expr = .{
+                            .dst_node = inner_expr_node,
+                        },
+                    },
+                });
             },
             .expect_grouped_end => |data| switch (token_kinds[parser.tokens_index]) {
                 else => unreachable,
@@ -956,6 +977,9 @@ const Parser = struct {
         expect_statement_or_expr: struct {
             dst_node: Node.Index,
         },
+        expect_expr: struct {
+            dst_node: Node.Index,
+        },
         expect_expr_primary: struct {
             dst_node: Node.Index,
         },
@@ -976,30 +1000,14 @@ const Parser = struct {
             inner_expr: Node.Index,
         },
         handle_semicolon_after_expr,
-
-        fn expectFullExpr(dst_node: Node.Index) [2]State {
-            return .{
-                .{
-                    .handle_expr_secondary = .{
-                        .dst_node = dst_node,
-                    },
-                },
-                .{
-                    .expect_expr_primary = .{
-                        .dst_node = dst_node,
-                    },
-                },
-            };
-        }
     };
 
     /// Assumes `self.tokens_index < self.tokens.list.len`.
     fn skipWhitespace(self: *Parser) void {
         const tokens_kind: []const Lexer.Token.Kind = self.tokens.list.items(.kind);
         if (tokens_kind[self.tokens_index] == .eof) return;
-        while (tokens_kind[self.tokens_index] == .whitespace) {
-            self.tokens_index += 1;
-        }
+        if (tokens_kind[self.tokens_index] == .whitespace) self.tokens_index += 1;
+        std.debug.assert(tokens_kind[self.tokens_index] != .whitespace);
     }
 
     fn addNode(
