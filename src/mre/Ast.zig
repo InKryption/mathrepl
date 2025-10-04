@@ -22,6 +22,7 @@ pub const Node = union(enum(u8)) {
     value_ref: ValueRef,
     un_op: UnOp,
     bin_op: BinOp,
+    if_else: IfElse,
     grouped: Grouped,
     block: Block,
 
@@ -120,6 +121,81 @@ pub const Node = union(enum(u8)) {
 
         pub fn pack(bin_op: BinOp) struct { Tokens.Value.Index, Packed.Data } {
             return .{ bin_op.op, .init(bin_op.lhs.toInt().?, bin_op.rhs.toInt().?) };
+        }
+    };
+
+    pub const IfElse = struct {
+        /// If this is `.null`, there is no else.
+        else_tok: Tokens.Value.Index,
+        cond: Node.Index,
+        branches: Branches,
+
+        pub fn unpack(main_token: Tokens.Value.Index, data: Packed.Data) IfElse {
+            const else_tok = main_token;
+            return .{
+                .else_tok = else_tok,
+                .cond = .fromInt(data.lhs),
+                .branches = switch (else_tok) {
+                    .null => .{ .true_only = .fromInt(data.rhs) },
+                    _ => .{ .both = data.rhs },
+                },
+            };
+        }
+
+        pub fn pack(if_else: IfElse) struct { Tokens.Value.Index, Packed.Data } {
+            const lhs = if_else.cond.toInt().?;
+            const rhs = switch (if_else.branches.tagged(if_else.branchesKind())) {
+                .true_only => |lhs_only| lhs_only.toInt().?,
+                .both => |both| both,
+            };
+            return .{ if_else.else_tok, .init(lhs, rhs) };
+        }
+
+        pub fn branchesKind(if_else: IfElse) Branches.Kind {
+            return switch (if_else.else_tok) {
+                .null => .true_only,
+                _ => .both,
+            };
+        }
+
+        pub const Branches = packed union {
+            /// This is used when `else_tok == .null`.
+            /// The node of the branch that would taken when the `cond` node is true.
+            true_only: Node.Index,
+            /// This is used when `else_tok != .null`.
+            /// The start of a length 2 array in the `extra_data` field of `Ast`, where
+            /// the first element represents the if-true branch node, and the second
+            /// element represents if-false branch node.
+            both: u32,
+
+            pub const Kind = std.meta.FieldEnum(Branches);
+
+            pub fn tagged(self: Branches, kind: Kind) Tagged {
+                return switch (kind) {
+                    .true_only => .{ .true_only = self.true_only },
+                    .both => .{ .both = self.both },
+                };
+            }
+
+            pub const Tagged = union(Kind) {
+                true_only: Node.Index,
+                both: u32,
+            };
+        };
+
+        /// Returns `.{ true_branch, false_branch }`.
+        pub fn getBranchNodes(
+            if_else: IfElse,
+            /// The `extra_data` field of `Ast`.
+            extra_data: []const u32,
+        ) struct { Node.Index, Node.Index } {
+            switch (if_else.branches.tagged(if_else.branchesKind())) {
+                .true_only => |true_only| return .{ true_only, .null },
+                .both => |both| {
+                    const true_branch, const false_branch = extra_data[both..][0..2].*;
+                    return .{ .fromInt(true_branch), .fromInt(false_branch) };
+                },
+            }
         }
     };
 
@@ -380,6 +456,12 @@ pub const NodeFmt = struct {
                     close_precedence_delim,
                     _,
                 },
+                if_else: enum(Int) {
+                    cond = initial,
+                    true_branch,
+                    false_branch,
+                    _,
+                },
                 block: packed struct(Int) {
                     index: Int = initial,
                 },
@@ -499,6 +581,63 @@ pub const NodeFmt = struct {
                         },
                         _ => unreachable,
                     }
+                },
+                .if_else => |if_else| switch (pending.state.if_else) {
+                    .cond => {
+                        pending_stack.appendSliceBounded(&.{
+                            .{
+                                .node = pending.node,
+                                .need_prec_paren = false,
+                                .state = .{ .if_else = .true_branch },
+                            },
+                            .{
+                                .node = if_else.cond,
+                                .need_prec_paren = false,
+                                .state = .{ .raw = .initial },
+                            },
+                        }) catch {
+                            try writeVecAllCopy(w, .{
+                                "if (", options.truncated_str, ") ", options.truncated_str, " else ", options.truncated_str,
+                            });
+                        };
+                        try w.writeAll("if (");
+                    },
+                    .true_branch => {
+                        const true_branch, _ = if_else.getBranchNodes(self.ast.extra_data);
+                        std.debug.assert(true_branch != .null);
+
+                        // if we got here, it means that the `appendSliceBounded` call in the `cond` branch
+                        // was successful in appending 2 nodes, and that capacity shouldn't be any different
+                        // at this point.
+                        pending_stack.appendSliceAssumeCapacity(&.{
+                            .{
+                                .node = pending.node,
+                                .need_prec_paren = false,
+                                .state = .{ .if_else = .false_branch },
+                            },
+                            .{
+                                .node = true_branch,
+                                .need_prec_paren = false,
+                                .state = .{ .raw = .initial },
+                            },
+                        });
+
+                        try w.writeAll(") ");
+                    },
+                    .false_branch => {
+                        _, const false_branch = if_else.getBranchNodes(self.ast.extra_data);
+                        if (false_branch != .null) {
+                            pending_stack.appendAssumeCapacity(
+                                .{
+                                    .node = false_branch,
+                                    .need_prec_paren = false,
+                                    .state = .{ .raw = .initial },
+                                },
+                            );
+                            try w.writeAll(" else ");
+                        }
+                    },
+                    _ => unreachable,
                 },
                 .block => |block| {
                     var state = pending.state.block;
@@ -806,6 +945,29 @@ const Parser = struct {
                         },
                     },
 
+                    .@"if" => {
+                        parser.tokens_index += 1;
+                        parser.skipWhitespace();
+
+                        if (token_kinds[parser.tokens_index] != .paren_l) {
+                            std.debug.panic("TODO: handle missing lparen after if", .{});
+                        }
+                        parser.tokens_index += 1;
+                        parser.skipWhitespace();
+
+                        const cond = try parser.addNode(gpa, undefined);
+
+                        try parser.states.append(gpa, .{ .expect_if_true_branch = .{
+                            .dst_node = data.dst_node,
+                            .cond = cond,
+                        } });
+                        continue :main_sw .{
+                            .expect_expr = .{
+                                .dst_node = cond,
+                            },
+                        };
+                    },
+
                     .ident,
                     .number,
                     .paren_l,
@@ -881,7 +1043,7 @@ const Parser = struct {
                 switch (token_kinds[parser.tokens_index]) {
                     else => |tag| std.debug.panic("TODO: {t}", .{tag}),
                     .whitespace => unreachable,
-                    .eof, .semicolon, .paren_r, .brace_r => {
+                    .eof, .semicolon, .paren_r, .brace_r, .@"else" => {
                         // do nothing, let the next popped state handle it now that we're done
                     },
 
@@ -939,7 +1101,7 @@ const Parser = struct {
 
                 const current_expr = parser.nodes.get(data.dst_node.toInt().?);
                 switch (current_expr.unpack()) {
-                    .value_ref, .un_op, .grouped, .block => {
+                    .value_ref, .un_op, .if_else, .grouped, .block => {
                         const lhs_expr_node = try parser.addNode(gpa, current_expr);
                         parser.nodes.set(data.dst_node.toInt().?, .pack(.{ .bin_op = .{
                             .lhs = lhs_expr_node,
@@ -967,7 +1129,7 @@ const Parser = struct {
                     switch (bind_which) {
                         .lhs => break .lhs,
                         .rhs => switch (parser.nodes.items(.tag)[lhs_bin_op.rhs.toInt().?]) {
-                            .value_ref, .un_op, .grouped, .block => break .rhs,
+                            .value_ref, .un_op, .if_else, .grouped, .block => break .rhs,
                             .bin_op => {
                                 lhs_bin_op_index = lhs_bin_op.rhs;
                                 continue;
@@ -991,7 +1153,7 @@ const Parser = struct {
                     .rhs => {
                         switch (parser.nodes.items(.tag)[lhs_bin_op.rhs.toInt().?]) {
                             .bin_op => unreachable,
-                            .value_ref, .un_op, .grouped, .block => {},
+                            .value_ref, .un_op, .if_else, .grouped, .block => {},
                         }
                         const rhs_outer_expr_node = try parser.addNode(gpa, .pack(.{ .bin_op = .{
                             .lhs = lhs_bin_op.rhs,
@@ -1001,6 +1163,61 @@ const Parser = struct {
                         parser.nodes.items(.data)[lhs_bin_op_index.toInt().?].rhs = rhs_outer_expr_node.toInt().?;
                     },
                 }
+            },
+            .expect_if_true_branch => |data| {
+                parser.skipWhitespace();
+                switch (token_kinds[parser.tokens_index]) {
+                    else => |t| std.debug.panic("TODO: '{t}', handle missing closing paren", .{t}),
+                    .paren_r => parser.tokens_index += 1,
+                }
+                const true_branch = try parser.addNode(gpa, undefined);
+                try parser.states.append(gpa, .{ .handle_if_false_branch = .{
+                    .dst_node = data.dst_node,
+                    .cond = data.cond,
+                    .true_branch = true_branch,
+                } });
+                continue :main_sw .{
+                    .expect_expr = .{
+                        .dst_node = true_branch,
+                    },
+                };
+            },
+            .handle_if_false_branch => |data| {
+                parser.skipWhitespace();
+                if (token_kinds[parser.tokens_index] != .@"else") {
+                    parser.nodes.set(data.dst_node.toInt().?, .pack(.{
+                        .if_else = .{
+                            .else_tok = .null,
+                            .cond = data.cond,
+                            .branches = .{ .true_only = data.true_branch },
+                        },
+                    }));
+                    break :main_sw;
+                }
+                const else_tok: Tokens.Value.Index = .fromInt(parser.tokens_index);
+                parser.tokens_index += 1;
+                parser.skipWhitespace();
+
+                try parser.extra_data.ensureUnusedCapacity(gpa, 2);
+                const false_branch = try parser.addNode(gpa, undefined);
+                const extra_data_start: u32 = @intCast(parser.extra_data.items.len);
+                parser.extra_data.appendSliceAssumeCapacity(&.{
+                    data.true_branch.toInt().?,
+                    false_branch.toInt().?,
+                });
+                parser.nodes.set(data.dst_node.toInt().?, .pack(.{
+                    .if_else = .{
+                        .else_tok = else_tok,
+                        .cond = data.cond,
+                        .branches = .{ .both = extra_data_start },
+                    },
+                }));
+
+                continue :main_sw .{
+                    .expect_expr = .{
+                        .dst_node = false_branch,
+                    },
+                };
             },
             .expect_grouped_start => |data| {
                 std.debug.assert(token_kinds[parser.tokens_index] == .paren_l);
@@ -1073,6 +1290,15 @@ const Parser = struct {
             rhs_op_tok: Tokens.Value.Index,
             rhs_expr: Node.Index,
         },
+        expect_if_true_branch: struct {
+            dst_node: Node.Index,
+            cond: Node.Index,
+        },
+        handle_if_false_branch: struct {
+            dst_node: Node.Index,
+            cond: Node.Index,
+            true_branch: Node.Index,
+        },
         expect_grouped_start: struct {
             dst_node: Node.Index,
         },
@@ -1131,6 +1357,7 @@ const TestNode = union(Node.Tag) {
         op: Lexer.Token.Kind,
         rhs: *const TestNode,
     },
+    if_else: struct { *const TestNode, *const TestNode, ?*const TestNode },
     grouped: *const TestNode,
     block: []const TestNode,
 
@@ -1234,6 +1461,31 @@ fn expectEqualAstNode(
                             .expected = expected_bin_op.lhs.*,
                             .actual_node = actual_bin_op.lhs,
                         } },
+                    });
+                },
+                .if_else => |expected_if_else| {
+                    const actual_if_else = actual_packed.unpack().if_else;
+                    const expected_cond, const expected_true, const maybe_expected_false = expected_if_else;
+
+                    if (maybe_expected_false) |expected_false| try states.append(gpa, .{
+                        .any = .{
+                            .expected = expected_false.*,
+                            .actual_node = actual_if_else.getBranchNodes(ast.extra_data)[1],
+                        },
+                    });
+                    try states.appendSlice(gpa, &.{
+                        .{
+                            .any = .{
+                                .expected = expected_true.*,
+                                .actual_node = actual_if_else.getBranchNodes(ast.extra_data)[0],
+                            },
+                        },
+                        .{
+                            .any = .{
+                                .expected = expected_cond.*,
+                                .actual_node = actual_if_else.cond,
+                            },
+                        },
                     });
                 },
                 .grouped => |expected_grouped| {
