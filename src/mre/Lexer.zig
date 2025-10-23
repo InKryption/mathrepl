@@ -357,7 +357,7 @@ pub const min_stream_buffer_size = blk: {
     break :blk longest_kw_len + min_delimiter_len;
 };
 
-pub const ReaderError = std.Io.Reader.ShortError;
+pub const ReaderError = error{ReadFailed};
 
 /// Returns `token`. Call `src.toss(token.getLen())` to advance past the returned token in the reader,
 /// so that the subsequent call to `peekToken` will return the next token.
