@@ -185,7 +185,7 @@ fn printTokensDump(
     try w.writeAll("tokens: .{");
     for (0..tokens.list.len) |i| {
         const token_index: mre.Tokens.Value.Index = .fromInt(@intCast(i));
-        const token = tokens.getNonNull(token_index);
+        const token = tokens.get(token_index).?;
 
         if (i == 0) try w.writeAll("\n");
         try w.print(

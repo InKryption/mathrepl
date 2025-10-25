@@ -24,14 +24,9 @@ pub fn get(self: Tokens, index: Value.Index) ?Value {
     return self.list.get(i);
 }
 
-/// Assumes `index != .null`.
-pub fn getNonNull(self: Tokens, index: Value.Index) Value {
-    return self.list.get(index.toInt().?);
-}
-
-/// Assumes `index != .null`.
-pub fn getKind(self: Tokens, index: Value.Index) Lexer.Token.Kind {
-    return self.tokenKinds()[index.toInt().?];
+pub fn getKind(self: Tokens, index: Value.Index) ?Lexer.Token.Kind {
+    const i = index.toInt() orelse return null;
+    return self.tokenKinds()[i];
 }
 
 pub fn tokenKinds(self: Tokens) []const Lexer.Token.Kind {

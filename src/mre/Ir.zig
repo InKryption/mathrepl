@@ -396,7 +396,7 @@ const Generator = struct {
                 } }),
                 .value_ref => |value_ref| try gen.handleExprValueRef(gpa, expr.dst, value_ref),
                 .un_op => |un_op| {
-                    const op_tok = gen.tokens.getNonNull(un_op.op);
+                    const op_tok = gen.tokens.get(un_op.op).?;
                     const op_kind = op_tok.kind.toOperator().?;
 
                     try gen.states.ensureUnusedCapacity(gpa, 1);
@@ -411,7 +411,7 @@ const Generator = struct {
                     gen.insts.set(expr.dst.toInt().?, .pack(inst_value));
                 },
                 .bin_op => |bin_op| {
-                    const op_tok = gen.tokens.getNonNull(bin_op.op);
+                    const op_tok = gen.tokens.get(bin_op.op).?;
                     const op_kind = op_tok.kind.toOperator() orelse std.debug.panic("TODO", .{});
                     try gen.insts.ensureUnusedCapacity(gpa, 2);
                     const lhs_inst = gen.addInstAssumeCapacityUndef();

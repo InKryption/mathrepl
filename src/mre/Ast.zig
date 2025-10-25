@@ -73,7 +73,7 @@ pub const Node = union(enum(u8)) {
         }
 
         pub fn getRawToken(ref: ValueRef, tokens: Tokens) Tokens.Value {
-            return tokens.getNonNull(ref.main_token);
+            return tokens.get(ref.main_token).?;
         }
 
         pub fn unpack(main_token: Tokens.Value.Index, data: Packed.Data) ValueRef {
@@ -512,7 +512,7 @@ pub const NodeFmt = struct {
                 },
                 .un_op => |un| {
                     std.debug.assert(pending.state.raw == .initial);
-                    const op_tok = self.tokens.getNonNull(un.op);
+                    const op_tok = self.tokens.get(un.op).?;
                     const op_str = op_tok.loc.getSrc(self.tokens.src.slice());
                     try w.writeAll(op_str);
                     pending_stack.appendAssumeCapacity(.{
@@ -522,7 +522,7 @@ pub const NodeFmt = struct {
                     });
                 },
                 .bin_op => |bin_op| {
-                    const op_tok = self.tokens.getNonNull(bin_op.op);
+                    const op_tok = self.tokens.get(bin_op.op).?;
                     const op_str = op_tok.loc.getSrc(self.tokens.src.slice());
                     const canon_spacing = oper_table.get(op_tok.kind.toOperator().?).canon_spacing;
                     const before: []const u8, const after: []const u8 = switch (canon_spacing) {
@@ -1463,7 +1463,7 @@ fn expectEqualAstNode(
                 .un_op => |expected_un_op| {
                     const expected_kind, const expected_operand = expected_un_op;
                     const actual_un_op = actual_packed.unpack().un_op;
-                    try std.testing.expectEqual(expected_kind, tokens.getNonNull(actual_un_op.op).kind);
+                    try std.testing.expectEqual(expected_kind, tokens.get(actual_un_op.op).?.kind);
                     states.appendAssumeCapacity(.{ .any = .{
                         .expected = expected_operand.*,
                         .actual_node = actual_un_op.operand,
