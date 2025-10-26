@@ -732,17 +732,17 @@ const OperInfo = struct {
         };
     }
 
-    fn choose(lhs: OperInfo, rhs: OperInfo) enum { invalid, lhs, rhs } {
-        return switch (std.math.order(lhs.prec, rhs.prec)) {
-            .eq => if (lhs.assoc != rhs.assoc)
+    fn choose(a: OperInfo, b: OperInfo) enum { invalid, a, b } {
+        return switch (std.math.order(a.prec, b.prec)) {
+            .eq => if (a.assoc != b.assoc)
                 .invalid
-            else switch (lhs.assoc) {
+            else switch (a.assoc) {
                 .none => .invalid,
-                .left => .lhs,
-                .right => .rhs,
+                .left => .a,
+                .right => .b,
             },
-            .lt => .rhs,
-            .gt => .lhs,
+            .lt => .b,
+            .gt => .a,
         };
     }
 };
@@ -1123,8 +1123,8 @@ const Parser = struct {
                     const lhs_op_info = oper_table.get(lhs_op_tag.toOperator().?);
                     const bind_which: BindWhich = switch (OperInfo.choose(lhs_op_info, rhs_op_info)) {
                         .invalid => std.debug.panic("TODO: Handle invalid associativity", .{}),
-                        .lhs => .lhs,
-                        .rhs => .rhs,
+                        .a => .lhs,
+                        .b => .rhs,
                     };
                     switch (bind_which) {
                         .lhs => break .lhs,
