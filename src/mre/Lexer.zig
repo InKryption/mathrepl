@@ -32,8 +32,12 @@ pub const Token = union(Kind) {
     @"if",
     @"else",
     underscore,
+    @"and",
+    @"or",
+    true,
+    false,
 
-    equal,
+    assign,
     semicolon,
     period,
     comma,
@@ -47,6 +51,12 @@ pub const Token = union(Kind) {
 
     brace_l,
     brace_r,
+
+    eq,
+    lt,
+    lt_eq,
+    gt,
+    gt_eq,
 
     colon,
     ampersand,
@@ -93,9 +103,17 @@ pub const Token = union(Kind) {
         @"else",
         /// Consists of `'_'`.
         underscore,
+        /// Consists of `'and'`.
+        @"and",
+        /// Consists of `'or'`.
+        @"or",
+        /// Consists of `'true'`.
+        true,
+        /// Consists of `'false'`.
+        false,
 
         /// Consists of `'='`.
-        equal,
+        assign,
         /// Consists of `';'`.
         semicolon,
         /// Consists of `'.'`.
@@ -119,6 +137,17 @@ pub const Token = union(Kind) {
         brace_l,
         /// Consists of `'}'`.
         brace_r,
+
+        /// Consists of `'=='`.
+        eq,
+        /// Consists of `'<'`.
+        lt,
+        /// Consists of `'<='`.
+        lt_eq,
+        /// Consists of `'>'`.
+        gt,
+        /// Consists of `'>='`.
+        gt_eq,
 
         /// Consists of `':'`.
         colon,
@@ -185,8 +214,12 @@ pub const Token = union(Kind) {
                 .@"if" => .{ .str = "if" },
                 .@"else" => .{ .str = "else" },
                 .underscore => .{ .char = '_' },
+                .@"and" => .{ .str = "and" },
+                .@"or" => .{ .str = "or" },
+                .true => .{ .str = "true" },
+                .false => .{ .str = "false" },
 
-                .equal => .{ .char = '=' },
+                .assign => .{ .char = '=' },
                 .colon => .{ .char = ':' },
                 .semicolon => .{ .char = ';' },
                 .period => .{ .char = '.' },
@@ -201,6 +234,14 @@ pub const Token = union(Kind) {
 
                 .brace_l => .{ .char = '{' },
                 .brace_r => .{ .char = '}' },
+
+                .eq => .{ .str = "==" },
+
+                .lt => .{ .char = '<' },
+                .lt_eq => .{ .str = "<=" },
+
+                .gt => .{ .char = '>' },
+                .gt_eq => .{ .str = ">=" },
 
                 .ampersand => .{ .char = '&' },
                 .pipe => .{ .char = '|' },
@@ -226,6 +267,14 @@ pub const Token = union(Kind) {
         }
 
         pub const Operator = enum(u8) {
+            lt = @intFromEnum(Kind.lt),
+            lt_eq = @intFromEnum(Kind.lt_eq),
+
+            gt = @intFromEnum(Kind.gt),
+            gt_eq = @intFromEnum(Kind.gt_eq),
+
+            eq = @intFromEnum(Kind.eq),
+
             colon = @intFromEnum(Kind.colon),
             ampersand = @intFromEnum(Kind.ampersand),
             pipe = @intFromEnum(Kind.pipe),
@@ -259,6 +308,10 @@ pub const Token = union(Kind) {
             @"if" = @intFromEnum(Kind.@"if"),
             @"else" = @intFromEnum(Kind.@"else"),
             underscore = @intFromEnum(Kind.underscore),
+            @"and" = @intFromEnum(Kind.@"and"),
+            @"or" = @intFromEnum(Kind.@"or"),
+            true = @intFromEnum(Kind.true),
+            false = @intFromEnum(Kind.false),
 
             pub fn toKind(kw: Keyword) Kind {
                 return @enumFromInt(@intFromEnum(kw));
@@ -271,6 +324,10 @@ pub const Token = union(Kind) {
                     @"if" = @intFromEnum(Keyword.@"if"),
                     @"else" = @intFromEnum(Keyword.@"else"),
                     @"_" = @intFromEnum(Keyword.underscore),
+                    @"and" = @intFromEnum(Keyword.@"and"),
+                    @"or" = @intFromEnum(Keyword.@"or"),
+                    true = @intFromEnum(Keyword.true),
+                    false = @intFromEnum(Keyword.false),
                 };
                 const kw = std.meta.stringToEnum(Kw, src) orelse return null;
                 return @enumFromInt(@intFromEnum(kw));
@@ -423,13 +480,13 @@ pub fn peekToken(
                 },
 
                 inline // zig fmt: off
-                '=', ':', ';', '.', ',', '#',
+                ':', ';', '.', ',', '#',
                 '&', '|', '%', '/',
                 '(', ')', '[', ']', '{', '}',
                 // zig fmt: on
                 => |char| {
                     const kind: Token.Kind = comptime switch (char) {
-                        '=' => .equal,
+                        '=' => .assign,
                         ':' => .colon,
                         ';' => .semicolon,
                         '.' => .period,
@@ -450,28 +507,39 @@ pub fn peekToken(
                     break :sw .{ kind, .start };
                 },
 
-                inline '+', '-', '*' => |char| {
+                inline // zig fmt: off
+                '+', '-', '*',
+                '=', '<', '>',
+                // zig fmt: on
+                => |char| {
                     const simple: Token.Kind, //
-                    const wrap: Token.Kind, //
-                    const saturate: Token.Kind //
+                    const wrap: ?Token.Kind, //
+                    const saturate: ?Token.Kind, //
+                    const equal: ?Token.Kind //
                     = comptime switch (char) {
-                        '+' => .{ .add, .add_wrap, .add_saturate },
-                        '-' => .{ .sub, .sub_wrap, .sub_saturate },
-                        '*' => .{ .mul, .mul_wrap, .mul_saturate },
+                        // zig fmt: off
+                        '+' => .{ .add,    .add_wrap, .add_saturate, null   },
+                        '-' => .{ .sub,    .sub_wrap, .sub_saturate, null   },
+                        '*' => .{ .mul,    .mul_wrap, .mul_saturate, null   },
+                        '=' => .{ .assign, null,      null,          .eq    },
+                        '<' => .{ .lt,     null,      null,          .lt_eq },
+                        '>' => .{ .gt,     null,      null,          .gt_eq },
                         else => @compileError("Unhandled: '" ++ .{char} ++ "'"),
+                        // zig fmt: on
                     };
 
                     const eof = try fillCheckEof(src, 2);
                     if (eof) break :sw .{ simple, .start };
                     const kind: Token.Kind = switch (src.buffered()[1]) {
-                        '%' => wrap,
-                        '|' => saturate,
+                        '%' => wrap orelse simple,
+                        '|' => saturate orelse simple,
+                        '=' => equal orelse simple,
                         '0'...'9' => switch (char) {
                             '-' => {
                                 buffered_end += 1;
                                 continue :sw .number;
                             },
-                            '+', '*' => break :sw .{ simple, .start },
+                            '+', '*', '=', '<', '>' => break :sw .{ simple, .start },
                             else => @compileError("Unhandled: '" ++ .{char} ++ "'"),
                         },
                         else => break :sw .{ simple, .start },
@@ -732,6 +800,10 @@ test Lexer {
     try expectTokenization("if", &.{.static(.@"if")});
     try expectTokenization("else", &.{.static(.@"else")});
     try expectTokenization("return", &.{.static(.@"return")});
+    try expectTokenization("and", &.{.static(.@"and")});
+    try expectTokenization("or", &.{.static(.@"or")});
+    try expectTokenization("true", &.{.static(.true)});
+    try expectTokenization("false", &.{.static(.false)});
     try expectTokenization("foo", &.{.init(.ident, "foo")});
     try expectTokenization("10_024.0", &.{.init(.number, "10_024.0")});
     try expectTokenization("-10_024.0u5", &.{.init(.number, "-10_024.0u5")});
@@ -744,7 +816,12 @@ test Lexer {
     });
     try expectTokenization("_", &.{.static(.underscore)});
     try expectTokenization(":", &.{.static(.colon)});
-    try expectTokenization("=", &.{.static(.equal)});
+    try expectTokenization("=", &.{.static(.assign)});
+    try expectTokenization("==", &.{.static(.eq)});
+    try expectTokenization("<", &.{.static(.lt)});
+    try expectTokenization("<=", &.{.static(.lt_eq)});
+    try expectTokenization(">", &.{.static(.gt)});
+    try expectTokenization(">=", &.{.static(.gt_eq)});
     try expectTokenization(";", &.{.static(.semicolon)});
     try expectTokenization(".", &.{.static(.period)});
     try expectTokenization(",", &.{.static(.comma)});
@@ -801,7 +878,7 @@ test Lexer {
             .space,
             .ident("u32"),
             .space,
-            .static(.equal),
+            .static(.assign),
             .space,
             .number("10_024.0"),
             .static(.colon),
@@ -811,7 +888,7 @@ test Lexer {
 
             .static(.underscore),
             .space,
-            .static(.equal),
+            .static(.assign),
             .space,
             .ident("foo"),
             .static(.semicolon),

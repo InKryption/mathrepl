@@ -31,8 +31,16 @@ pub const Inst = union(Tag) {
 
     typed: Typed,
 
+    eq: BinOp,
+    lt: BinOp,
+    lt_eq: BinOp,
+    gt: BinOp,
+    gt_eq: BinOp,
+
     negate: UnOp,
     negate_wrap: UnOp,
+
+    div: BinOp,
 
     add: BinOp,
     add_wrap: BinOp,
@@ -45,8 +53,6 @@ pub const Inst = union(Tag) {
     mul: BinOp,
     mul_wrap: BinOp,
     mul_saturate: BinOp,
-
-    div: BinOp,
 
     if_true: IfTrue,
     if_else: IfElse,
@@ -112,8 +118,18 @@ pub const Inst = union(Tag) {
 
             typed: Typed,
 
+            eq: BinOp,
+
+            lt: BinOp,
+            lt_eq: BinOp,
+
+            gt: BinOp,
+            gt_eq: BinOp,
+
             negate: UnOp,
             negate_wrap: UnOp,
+
+            div: BinOp,
 
             add: BinOp,
             add_wrap: BinOp,
@@ -126,8 +142,6 @@ pub const Inst = union(Tag) {
             mul: BinOp,
             mul_wrap: BinOp,
             mul_saturate: BinOp,
-
-            div: BinOp,
 
             if_true: IfTrue,
             if_else: IfElse,
@@ -421,6 +435,14 @@ const Generator = struct {
 
                         inline //
                         .div,
+
+                        .eq,
+
+                        .lt,
+                        .lt_eq,
+
+                        .gt,
+                        .gt_eq,
 
                         .add,
                         .add_wrap,

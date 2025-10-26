@@ -748,23 +748,31 @@ const OperInfo = struct {
 };
 
 const oper_table: std.EnumArray(Lexer.Token.Kind.Operator, OperInfo) = .init(.{
-    .colon = .init(3, .left, .stick_to_left),
-    .ampersand = .init(1, .left, .surround),
-    .pipe = .init(1, .left, .surround),
-    .modulo = .init(2, .left, .surround),
-    .div = .init(2, .left, .surround),
+    .colon = .init(30, .left, .stick_to_left),
+    .ampersand = .init(10, .left, .surround),
+    .pipe = .init(10, .left, .surround),
+    .modulo = .init(20, .left, .surround),
+    .div = .init(20, .left, .surround),
 
-    .add = .init(1, .left, .surround),
-    .add_wrap = .init(1, .left, .surround),
-    .add_saturate = .init(1, .left, .surround),
+    .eq = .init(0, .none, .surround),
 
-    .sub = .init(1, .left, .surround),
-    .sub_wrap = .init(1, .left, .surround),
-    .sub_saturate = .init(1, .left, .surround),
+    .lt = .init(0, .none, .surround),
+    .lt_eq = .init(0, .none, .surround),
 
-    .mul = .init(2, .left, .surround),
-    .mul_wrap = .init(2, .left, .surround),
-    .mul_saturate = .init(2, .left, .surround),
+    .gt = .init(0, .none, .surround),
+    .gt_eq = .init(0, .none, .surround),
+
+    .add = .init(10, .left, .surround),
+    .add_wrap = .init(10, .left, .surround),
+    .add_saturate = .init(10, .left, .surround),
+
+    .sub = .init(10, .left, .surround),
+    .sub_wrap = .init(10, .left, .surround),
+    .sub_saturate = .init(10, .left, .surround),
+
+    .mul = .init(20, .left, .surround),
+    .mul_wrap = .init(20, .left, .surround),
+    .mul_saturate = .init(20, .left, .surround),
 });
 
 pub fn parse(
@@ -974,6 +982,8 @@ const Parser = struct {
                     .brace_l,
                     .sub,
                     .sub_wrap,
+                    .true,
+                    .false,
                     => try parser.states.appendSlice(gpa, &.{
                         .{
                             .handle_expr_secondary = .{
@@ -1017,6 +1027,11 @@ const Parser = struct {
                             .value_ref = parser.consumeValueRef(),
                         }));
                     },
+                    .true, .false => {
+                        parser.nodes.set(data.dst_node.toInt().?, .pack(.{
+                            .value_ref = parser.consumeValueRef(),
+                        }));
+                    },
                     .paren_l => {
                         continue :main_sw .{
                             .expect_grouped_start = .{
@@ -1047,6 +1062,13 @@ const Parser = struct {
                         // do nothing, let the next popped state handle it now that we're done
                     },
 
+                    .eq,
+                    .lt,
+                    .lt_eq,
+                    .gt,
+                    .gt_eq,
+
+                    .colon,
                     .ampersand,
                     .pipe,
                     .modulo,
@@ -1063,8 +1085,6 @@ const Parser = struct {
                     .mul,
                     .mul_wrap,
                     .mul_saturate,
-
-                    .colon,
                     => {
                         const rhs_op_tok: Tokens.Value.Index = .fromInt(parser.tokens_index);
                         parser.tokens_index += 1;
