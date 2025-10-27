@@ -573,23 +573,32 @@ const Generator = struct {
         dst_inst: Inst.Index,
         value_ref: Ast.Node.ValueRef,
     ) std.mem.Allocator.Error!void {
+        const full_src = value_ref.getSrc(gen.tokens);
+        std.debug.assert(full_src.len != 0);
+
         switch (value_ref.getKind(gen.tokens)) {
             .ident => std.debug.panic("TODO", .{}),
             .number => {
-                const full_src = value_ref.getSrc(gen.tokens);
                 const is_neg = full_src[0] == '-';
-                const type_suffix_start_opt = std.mem.lastIndexOfAny(u8, full_src, &.{ 'u', 'i' });
+                const type_suffix_start_opt = value_ref.getIntSuffixStart();
                 const main_src_signed = full_src[0 .. type_suffix_start_opt orelse full_src.len];
                 const main_src = full_src[if (is_neg) 1 else 0 .. type_suffix_start_opt orelse full_src.len];
 
                 const int_inst: Inst.Index = if (type_suffix_start_opt) |type_suffix_start| blk: {
                     const type_suffix = full_src[type_suffix_start..];
-                    try gen.insts.ensureUnusedCapacity(gpa, 1);
+                    try gen.insts.ensureUnusedCapacity(gpa, 2);
+
+                    const new_type = gen.addInstAssumeCapacityUndef();
+                    gen.insts.set(new_type.toInt().?, undefined);
+
                     const new_inst = gen.addInstAssumeCapacityUndef();
-                    gen.insts.set(dst_inst.toInt().?, .pack(.{ .typed = .{
-                        .operand = new_inst,
-                        .type = if (true) std.debug.panic("TODO: inst for types using {s}", .{type_suffix}),
-                    } }));
+                    gen.insts.set(dst_inst.toInt().?, .pack(.{ .typed = .{ .operand = new_inst, .type = new_type } }));
+
+                    if (true) std.debug.panic("handle type suffix '{f}' in '{f}'", .{
+                        std.zig.fmtString(type_suffix),
+                        std.zig.fmtString(full_src),
+                    });
+
                     break :blk new_inst;
                 } else dst_inst;
 

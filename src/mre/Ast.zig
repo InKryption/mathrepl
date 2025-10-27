@@ -54,9 +54,19 @@ pub const Node = union(enum(u8)) {
 
     pub const ValueRef = struct {
         main_token: Tokens.Value.Index,
-        unused_data: Packed.Data = .init(0, 0),
+        flag: Flag,
+        flag_data: u32,
 
         pub const Kind = enum { ident, number };
+
+        pub const Flag = enum(u32) {
+            /// `flag_data` should be `0`.
+            none,
+            /// `flag_data` is the index of the start of the type suffix in the string returned by `getSrc()`.
+            typed_int,
+
+            _,
+        };
 
         pub fn getKind(ref: ValueRef, tokens: Tokens) Kind {
             const tok = ref.getRawToken(tokens);
@@ -72,6 +82,14 @@ pub const Node = union(enum(u8)) {
             return tok.loc.getSrc(tokens.src.slice());
         }
 
+        pub fn getIntSuffixStart(ref: ValueRef) ?u32 {
+            return switch (ref.flag) {
+                .none => null,
+                .typed_int => ref.flag_data,
+                _ => unreachable,
+            };
+        }
+
         pub fn getRawToken(ref: ValueRef, tokens: Tokens) Tokens.Value {
             return tokens.get(ref.main_token).?;
         }
@@ -79,12 +97,13 @@ pub const Node = union(enum(u8)) {
         pub fn unpack(main_token: Tokens.Value.Index, data: Packed.Data) ValueRef {
             return .{
                 .main_token = main_token,
-                .unused_data = data,
+                .flag = @enumFromInt(data.lhs),
+                .flag_data = data.rhs,
             };
         }
 
         pub fn pack(ref: ValueRef) struct { Tokens.Value.Index, Packed.Data } {
-            return .{ ref.main_token, ref.unused_data };
+            return .{ ref.main_token, .init(@intFromEnum(ref.flag), ref.flag_data) };
         }
     };
 
@@ -1357,14 +1376,27 @@ const Parser = struct {
     }
 
     fn consumeValueRef(self: *Parser) Node.ValueRef {
-        const tokens_kind: []const Lexer.Token.Kind = self.tokens.list.items(.kind);
-        switch (tokens_kind[self.tokens_index]) {
-            .ident, .number => {},
+        const main_token: Tokens.Value.Index = .fromInt(self.tokens_index);
+        self.tokens_index += 1;
+
+        const flag: Node.ValueRef.Flag, //
+        const flag_data: u32 //
+        = switch (self.tokens.getKind(main_token).?) {
+            .ident => .{ .none, 0 },
+            .number => blk: {
+                const num_src = self.tokens.get(main_token).?.loc.getSrc(self.tokens.src.slice());
+                const type_suffix_start = std.mem.lastIndexOfAny(u8, num_src, &.{ 'u', 'i' }) orelse {
+                    break :blk .{ .none, 0 };
+                };
+                break :blk .{ .typed_int, @intCast(type_suffix_start) };
+            },
             else => unreachable,
-        }
-        defer self.tokens_index += 1;
+        };
+
         return .{
-            .main_token = .fromInt(self.tokens_index),
+            .main_token = main_token,
+            .flag = flag,
+            .flag_data = flag_data,
         };
     }
 };
